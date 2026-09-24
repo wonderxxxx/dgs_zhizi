@@ -1,0 +1,45 @@
+# 千夜智子 · 模型无关配置
+# 切换调用方式只需改 provider 段；代码零改动。
+
+provider:
+  type: mlx                   # api = 云端 API；local = 本地服务（Ollama / LM Studio）；mlx = 进程内推理（Apple Silicon，不起服务）
+  # —— mlx（进程内）：model 为 HF 仓库或本地 MLX 权重路径 ——
+  model: "/Users/dango_studio/.lmstudio/models/lmstudio-community/Qwen3.8-27B-MLX-4bit"
+#  model: "/Users/dango_studio/.lmstudio/models/lmstudio-community/Qwen3-Next-80B-A3B-Instruct-MLX-4bit"
+#  model: "/Users/dango_studio/.lmstudio/models/lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit"
+  temperature: 0.85
+  max_tokens: 1024            # 单次回复生成上限
+  enable_thinking: false      # 对话关思考：更快；true 时需加大 max_tokens，防思考截断空回复
+  multimodal: auto            # auto=按权重检测（mlx_vlm）；true/false 强制开启/关闭多模态
+  model_dir: "/Users/dango_studio/.lmstudio/models/lmstudio-community"  # 模型切换器扫描目录
+
+  # —— 本地服务示例：type 改 local 并换成下面配置 ——
+  # base_url: "http://localhost:1234/v1"   # LM Studio
+  # model: "google/gemma-4-26b-a4b-qat"
+  # api_key: "ollama"
+
+  # —— 云端 API 示例：type 改 api 并换成下面配置 ——
+  # base_url: "https://ark.cn-beijing.volces.com/api/v3"  # 豆包·火山方舟
+  # model: "doubao-seed-1.6"
+  # api_key: "${ARK_API_KEY}"
+
+memory:
+  engine: "sqlite_bm25"     # v2：SQLite 持久化 + BM25 倒排检索（零依赖）；旧 JSONL 首次启动自动迁移
+  note_file: "notes"        # 「观测笔记」目录（每用户一个子目录，内含 notes.db）
+  top_k: 5                  # 每轮最多注入的笔记条数
+
+system_prompt: "prompts/zhizi_v1.md"
+
+router:
+  enabled: false            # 路由层后置，默认关闭（小模型语域/插件判断）
+  model: "doubao-lite"
+
+server:
+  host: "127.0.0.1"         # API 监听地址；局域网/公网部署时按需修改
+  port: 8765
+  api_key: ""               # 留空=不鉴权；非空时 /chat 需带 Authorization: Bearer <api_key>
+
+observability:
+  log_file: "logs/zhizi.log"  # 结构化日志文件；留空=只打 stderr
+  level: "INFO"               # DEBUG / INFO / WARNING / ERROR
+  dashboard: true             # 暴露 GET /dashboard 实时监控页

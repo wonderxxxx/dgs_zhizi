@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>千夜智子 · 监控</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #8b93a7; --accent: #7aa2ff;
+    --ok: #3dd68c; --warn: #f5a524; --err: #f31260;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); margin-right: 8px; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.off { background: var(--err); }
+  main { padding: 16px 20px 40px; max-width: 1100px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .card .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  section { margin-top: 20px; }
+  section h2 {
+    margin: 0 0 10px; font-size: 13px; font-weight: 600;
+    color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+  }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  #events { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; max-height: 320px; overflow: auto; font-family: ui-monospace, monospace; font-size: 12px; }
+  .ev { padding: 6px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; }
+  .ev:last-child { border-bottom: none; }
+  .ev .t { color: var(--muted); min-width: 64px; }
+  .ev .k { color: var(--accent); min-width: 100px; }
+  .ev .k.err { color: var(--err); }
+  .ev .k.ok { color: var(--ok); }
+  .meta { color: var(--muted); font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px;
+    background: #222836; border: 1px solid var(--border); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="live" class="dot"></span>千夜智子 · 运行监控</h1>
+  <div class="meta">
+    <span class="pill" id="model">–</span>
+    <span class="pill" id="uptime">–</span>
+    <span class="pill" id="clock">–</span>
+  </div>
+</header>
+<main>
+  <div class="grid" id="cards"></div>
+
+  <section>
+    <h2>延迟（ms）</h2>
+    <table>
+      <thead><tr><th>指标</th><th style="text-align:right">次数</th><th style="text-align:right">最近</th><th style="text-align:right">平均</th><th style="text-align:right">最小</th><th style="text-align:right">最大</th></tr></thead>
+      <tbody id="timers"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>计数器</h2>
+    <table>
+      <thead><tr><th>名称</th><th style="text-align:right">值</th></tr></thead>
+      <tbody id="counters"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>实时事件</h2>
+    <div id="events"></div>
+  </section>
+</main>
+
+<script>
+const cardsEl = document.getElementById('cards');
+const timersEl = document.getElementById('timers');
+const countersEl = document.getElementById('counters');
+const eventsEl = document.getElementById('events');
+const liveEl = document.getElementById('live');
+const seen = new Set();
+
+function fmt(n) {
+  if (n == null || n === '') return '–';
+  if (typeof n === 'number') {
+    if (Number.isInteger(n)) return n.toLocaleString();
+    return n.toFixed(2);
+  }
+  return String(n);
+}
+
+function renderSnapshot(s) {
+  document.getElementById('uptime').textContent = 'up ' + Math.floor(s.uptime_sec / 60) + 'm ' + Math.floor(s.uptime_sec % 60) + 's';
+  const g = s.gauges || {};
+  const c = s.counters || {};
+  const cards = [
+    { label: '聊天轮次', value: c.chat_turns || 0 },
+    { label: 'LLM 调用', value: c.llm_calls || 0, sub: 'errors ' + (c.llm_errors || 0) },
+    { label: '生成速度', value: g.mlx_gen_tps != null ? g.mlx_gen_tps : '–', sub: 'tok/s' },
+    { label: 'Prompt 速度', value: g.mlx_prompt_tps != null ? g.mlx_prompt_tps : '–', sub: 'tok/s' },
+    { label: '峰值内存', value: g.mlx_peak_mem_gb != null ? g.mlx_peak_mem_gb : '–', sub: 'GB' },
+    { label: '活跃用户', value: g.users_active != null ? g.users_active : 0 },
+    { label: '已提事实', value: c.facts_extracted || 0 },
+    { label: '空回复', value: c.mlx_empty_replies || 0 },
+    { label: '记忆错误', value: c.memory_errors || 0 },
+    { label: 'MLX 加载', value: g.mlx_loaded ? 'OK' : '–', sub: '首次 load' },
+  ];
+  cardsEl.innerHTML = cards.map(x =>
+    `<div class="card"><div class="label">${x.label}</div><div class="value">${fmt(x.value)}</div>${x.sub ? `<div class="sub">${x.sub}</div>` : ''}</div>`
+  ).join('');
+
+  const timers = s.timers || {};
+  const rows = Object.keys(timers).sort().map(k => {
+    const t = timers[k];
+    return `<tr><td>${k}</td><td class="num">${fmt(t.count)}</td><td class="num">${fmt(t.last_ms)}</td><td class="num">${fmt(t.avg_ms)}</td><td class="num">${fmt(t.min_ms)}</td><td class="num">${fmt(t.max_ms)}</td></tr>`;
+  });
+  timersEl.innerHTML = rows.join('') || '<tr><td colspan="6" class="meta">暂无数据</td></tr>';
+
+  const crows = Object.keys(c).sort().map(k =>
+    `<tr><td>${k}</td><td class="num">${fmt(c[k])}</td></tr>`
+  );
+  countersEl.innerHTML = crows.join('') || '<tr><td colspan="2" class="meta">暂无数据</td></tr>';
+
+  // 回填历史事件（仅未见过的）
+  (s.recent_events || []).forEach(addEvent);
+}
+
+function addEvent(ev) {
+  const id = ev.ts + ':' + ev.kind + ':' + JSON.stringify(ev);
+  if (seen.has(id)) return;
+  seen.add(id);
+  if (seen.size > 400) { /* soft cap */ }
+  const d = new Date(ev.ts * 1000);
+  const t = d.toTimeString().slice(0, 8);
+  const kindCls = /error|empty|fail/.test(ev.kind) ? 'err' : (/loaded|created/.test(ev.kind) ? 'ok' : '');
+  const rest = Object.assign({}, ev);
+  delete rest.ts; delete rest.kind;
+  const line = document.createElement('div');
+  line.className = 'ev';
+  line.innerHTML = `<span class="t">${t}</span><span class="k ${kindCls}">${ev.kind}</span><span>${escapeHtml(JSON.stringify(rest))}</span>`;
+  eventsEl.insertBefore(line, eventsEl.firstChild);
+  while (eventsEl.children.length > 80) eventsEl.removeChild(eventsEl.lastChild);
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/metrics');
+    const s = await r.json();
+    liveEl.className = 'dot on';
+    renderSnapshot(s);
+    if (s.model) document.getElementById('model').textContent = s.model;
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    liveEl.className = 'dot off';
+  }
+}
+
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.onopen = () => { liveEl.className = 'dot on'; };
+  es.onerror = () => { liveEl.className = 'dot off'; };
+  es.onmessage = (m) => {
+    try { addEvent(JSON.parse(m.data)); } catch (_) {}
+  };
+}
+
+refresh();
+connectSSE();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

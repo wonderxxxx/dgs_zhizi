@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>千夜智子 · 记忆观察</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #8b93a7; --accent: #7aa2ff;
+    --ok: #3dd68c; --warn: #f5a524; --err: #f31260;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.6 -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); flex-wrap: wrap; position: sticky; top: 0; z-index: 20;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; white-space: nowrap; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); margin-right: 8px; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.off { background: var(--err); }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .controls label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  input[type="text"], input[type="password"] {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 6px 10px; font: inherit; width: 110px; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  button.danger { color: var(--err); }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+  button {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  a.link { color: var(--accent); text-decoration: none; font-size: 12px; }
+  a.link:hover { text-decoration: underline; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px;
+    background: #222836; border: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+
+  .tabs { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--border); }
+  .tab {
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); padding: 8px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); background: transparent; }
+  .tab .badge { background: #222836; border-radius: 999px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
+
+  main { padding: 16px 20px 60px; max-width: 1100px; margin: 0 auto; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  h2.sec { margin: 26px 0 10px; font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; }
+  h2.sec:first-child { margin-top: 4px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .card .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .sub { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; margin-top: 10px; }
+  .box.slim { padding: 10px 12px; }
+
+  .item { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+    background: #14161d; margin-top: 8px; }
+  .item pre, .item .body { white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .item .meta { color: var(--muted); font-size: 11px; margin-top: 6px; display: flex;
+    gap: 8px; flex-wrap: wrap; align-items: center; }
+  .item .tm { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  mark { background: #3a4a2b; color: #b8f39a; padding: 0 2px; border-radius: 3px; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+    background: #222836; border: 1px solid var(--border); }
+  .badge.b { color: var(--accent); } .badge.w { color: var(--warn); }
+  .badge.g { color: var(--ok); } .badge.e { color: var(--err); }
+  .confbar { height: 4px; background: #222836; border-radius: 2px; overflow: hidden; margin-top: 6px; }
+  .confbar > i { display: block; height: 100%; background: var(--accent); }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px;
+    background: #1c2230; border: 1px solid var(--border); margin: 3px 6px 3px 0; }
+  .chip b { color: var(--accent); font-weight: 600; }
+  .msgs { display: flex; flex-direction: column; gap: 8px; }
+  .msg { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border); }
+  .msg.user { align-self: flex-end; background: #22304a; max-width: 90%; }
+  .msg.bot  { align-self: flex-start; background: #1c2029; max-width: 90%; }
+  .msg .role { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+  .msg pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+
+  .dimhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .dimhead h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .reason { color: var(--muted); font-size: 12px; flex: 1; min-width: 200px; }
+  .empty { color: var(--muted); font-size: 12px; padding: 6px 2px; }
+
+  .searchrow { display: flex; gap: 10px; align-items: center; }
+  .searchrow input { flex: 1; width: auto; }
+  .searchrow button { flex-shrink: 0; background: var(--accent); border-color: var(--accent); color: #0f1115; font-weight: 600; }
+
+  .recall { margin-top: 12px; }
+  .recall summary { cursor: pointer; font-size: 13px; color: var(--text); display: flex;
+    gap: 10px; align-items: center; flex-wrap: wrap; }
+  .recall summary::-webkit-details-marker { color: var(--muted); }
+  .recall .meta { color: var(--muted); font-size: 11px; }
+  details.recall > *:not(summary) { margin-top: 8px; }
+
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: rot .8s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+  .notice { color: var(--muted); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="live" class="dot"></span>千夜智子 · 记忆观察</h1>
+  <div class="controls">
+    <label>用户 <input type="text" id="userId" value="default" spellcheck="false"/></label>
+    <button id="refresh">刷新</button>
+    <label>Key <input type="password" id="apiKey" placeholder="无则留空" style="width:90px"/></label>
+    <button id="clearBtn" class="danger" title="清空该用户全部记忆（不可恢复）">清空记忆</button>
+    <a class="link" href="/chat">聊天</a>
+    <a class="link" href="/dashboard">监控</a>
+    <span class="pill" id="model">–</span>
+  </div>
+</header>
+
+<div class="tabs">
+  <button class="tab active" data-tab="overview">记忆总览</button>
+  <button class="tab" data-tab="recall">召回过程</button>
+  <button class="tab" data-tab="log">真实召回日志 <span class="badge" id="logCount">0</span></button>
+</div>
+
+<main>
+  <!-- ─── 记忆总览 ─── -->
+  <section id="panel-overview" class="panel active">
+    <div id="ovLoading" class="notice"><span class="spin"></span> 加载中…</div>
+    <div id="ovError" class="notice" style="display:none; color:var(--err)"></div>
+    <div id="ovBody">
+      <div class="grid" id="ovStats"></div>
+
+      <h2 class="sec">人格摘要</h2>
+      <div id="ovSummaries"></div>
+
+      <h2 class="sec">个人特质</h2>
+      <div id="ovTraits" class="box"></div>
+
+      <h2 class="sec">事实记忆</h2>
+      <div id="ovFacts"></div>
+
+      <h2 class="sec">反思记忆</h2>
+      <div id="ovReflections"></div>
+
+      <h2 class="sec">近期记忆（时间倒序）</h2>
+      <div id="ovTimeindex"></div>
+
+      <h2 class="sec">工作记忆（最近对话）</h2>
+      <div id="ovRecent"></div>
+    </div>
+  </section>
+
+  <!-- ─── 召回过程 ─── -->
+  <section id="panel-recall" class="panel">
+    <div class="searchrow">
+      <input id="searchQuery" type="text" placeholder="输入一句话，看她会召回什么记忆，例如：哥哥的零食"/>
+      <button id="searchBtn">搜索 &amp; 查看召回</button>
+    </div>
+    <div class="notice">召回模拟：直接跑一遍记忆检索流程（工作记忆 / 人格 / BM25 近期记忆 / 事实 / 反思），不改写任何数据。tokens 中词命中处会高亮。</div>
+    <div id="searchResult"></div>
+  </section>
+
+  <!-- ─── 真实召回日志 ─── -->
+  <section id="panel-log" class="panel">
+    <div class="notice">这里是你和智子真实对话时，每轮发生在服务端的内存召回过程（最新在前）。</div>
+    <button id="logRefresh" style="margin-top:10px">刷新</button>
+    <div id="logList" style="margin-top:6px"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const liveEl = $('live');
+const savedUser = localStorage.getItem('zhizi_mem_user');
+if (savedUser) $('userId').value = savedUser;
+const savedKey = localStorage.getItem('zhizi_mem_key');
+if (savedKey) $('apiKey').value = savedKey;
+function currentUser() { const u = ($('userId').value || 'default').trim() || 'default';
+  localStorage.setItem('zhizi_mem_user', u); return u; }
+function currentKey() { const k = $('apiKey').value.trim();
+  localStorage.setItem('zhizi_mem_key', k); return k; }
+
+// ── tabs ──
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('.panel').forEach(p => {
+      p.classList.toggle('active', p.id === 'panel-' + tab.dataset.tab);
+    });
+    if (tab.dataset.tab === 'log') loadLog();
+  });
+});
+
+// ── helpers ──
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function hl(text, terms) {
+  let t = esc(text);
+  (terms || []).forEach(term => {
+    if (!term) return;
+    const safe = String(term).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    t = t.replace(new RegExp(safe, 'g'), m => '<mark>' + m + '</mark>');
+  });
+  return t;
+}
+function fmtTime(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : ''; }
+function meters(v) { return v == null || v === '' ? '–' : v; }
+function conf(v) { return v == null ? '–' : (Math.round(v * 100) + '%'); }
+
+// ── overview renderers ──
+function renderStats(d) {
+  const s = (d && d.stats) || {};
+  const n = x => (x && x.message_count != null) ? x.message_count : (x && x.total_memories);
+  const cards = [
+    { label: '工作记忆', value: s.recent ? s.recent.message_count : 0, sub: '最近对话条数' },
+    { label: '近期记忆', value: s.timeindex ? s.timeindex.total_memories : 0, sub: '时间索引条目' },
+    { label: '事实记忆', value: s.facts ? s.facts.total_facts : 0, sub: '置信度 ' + (s.facts && s.facts.average_confidence) },
+    { label: '反思记忆', value: s.reflections ? s.reflections.total_reflections : 0, sub: '确认 ' + (s.reflections ? s.reflections.confirmed : 0) },
+    { label: '人格特征', value: s.persona ? s.persona.total_traits : 0, sub: '摘要 ' + (s.persona ? s.persona.total_summaries : 0) },
+    { label: '最近记忆', value: n(s.timeindex) ? (s.timeindex.latest_memory || '–').slice(0, 10) : '–', sub: '距现在最近的一条' },
+  ];
+  $('ovStats').innerHTML = cards.map(c =>
+    `<div class="card"><div class="label">${c.label}</div><div class="value">${esc(c.value)}</div><div class="sub">${esc(c.sub)}</div></div>`
+  ).join('');
+}
+
+function renderSummaries(p) {
+  const sums = (p && p.summaries) || [];
+  if (!sums.length) return $('ovSummaries').innerHTML = '<div class="empty">暂无人格摘要（聊够 10 条 / 触发分析后生成）</div>';
+  $('ovSummaries').innerHTML = sums.map(s =>
+    `<div class="item"><div class="body">${esc(s.summary)}</div><div class="meta">
+       <span class="badge b">v${s.version}</span><span>${fmtTime(s.created_at)}</span></div></div>`
+  ).join('');
+}
+
+function renderTraits(p) {
+  const traits = (p && p.traits) || [];
+  if (!traits.length) return $('ovTraits').innerHTML = '<div class="empty">暂无特征</div>';
+  const byCat = {};
+  traits.forEach(t => (byCat[t.category] = byCat[t.category] || []).push(t));
+  $('ovTraits').innerHTML = Object.keys(byCat).map(cat =>
+    `<div style="margin-top:4px"><span class="pill">${esc(cat)}</span><br/>` +
+    byCat[cat].map(t => `<span class="chip"><b>${esc(t.trait)}</b>：${esc(t.value)} <span style="color:var(--muted)">${conf(t.confidence)}</span></span>`).join('') +
+    `</div>`
+  ).join('');
+}
+
+function renderFacts(facts) {
+  if (!facts || !facts.length) return $('ovFacts').innerHTML = '<div class="empty">暂无事实记忆</div>';
+  $('ovFacts').innerHTML = facts.map(f =>
+    `<div class="item"><div class="body">${esc(f.fact)}</div>
+     <div class="meta"><span class="badge b">置信 ${conf(f.confidence)}</span><span>${fmtTime(f.created_at)}</span></div>
+     <div class="confbar"><i style="width:${Math.round((f.confidence||0)*100)}%"></i></div>
+     ${f.source ? `<div class="tm">来源：${esc(f.source)}</div>` : ''}</div>`
+  ).join('');
+}
+
+function renderReflections(refs) {
+  if (!refs || !refs.length) return $('ovReflections').innerHTML = '<div class="empty">暂无反思记忆</div>';
+  $('ovReflections').innerHTML = refs.map(r =>
+    `<div class="item"><div class="body">${esc(r.reflection)}</div>
+     <div class="body" style="color:var(--muted);margin-top:4px;font-size:12px">${esc(r.insight)}</div>
+     <div class="meta"><span class="badge ${r.status === 'confirmed' ? 'g' : (r.status === 'rejected' ? 'e' : 'w')}">${esc(r.status)}</span>
+     <span class="badge">置信 ${conf(r.confidence)}</span><span>${fmtTime(r.created_at)}</span></div></div>`
+  ).join('');
+}
+
+function renderTimeindex(tim) {
+  if (!tim || !tim.length) return $('ovTimeindex').innerHTML = '<div class="empty">暂无近期记忆</div>';
+  $('ovTimeindex').innerHTML = tim.map(t =>
+    `<div class="item"><div class="body">${esc(t.content)}</div>
+     <div class="meta"><span class="badge w">重要度 ${t.importance ?? '–'}</span>
+     <span class="badge">${esc(t.category || 'conversation')}</span><span>${fmtTime(t.time)}</span></div></div>`
+  ).join('');
+}
+
+function renderRecent(recent) {
+  const msgs = recent || [];
+  if (!msgs.length) return $('ovRecent').innerHTML = '<div class="empty">暂无对话</div>';
+  $('ovRecent').innerHTML = `<div class="msgs">` + msgs.map(m => {
+    const cls = m.role === 'user' ? 'user' : 'bot';
+    return `<div class="msg ${cls}"><div class="role">${esc(m.role)}</div><pre>${esc(m.content)}</pre></div>`;
+  }).join('') + `</div>`;
+}
+
+// ── dimension trace renderer（召回搜索 & 真实日志共用） ──
+function renderTrace(dims, container) {
+  if (!dims || !dims.length) { container.innerHTML = '<div class="empty">无可召回内容</div>'; return; }
+  container.innerHTML = dims.map(d => {
+    const items = d.items || [];
+    let body;
+    if (!items.length) {
+      body = `<div class="empty">此维度无命中</div>`;
+    } else {
+      body = items.map(it => {
+        const terms = it.matched_terms || [];
+        let out;
+        if (d.dim === 'recent') {
+          out = `<div class="body">${hl(it.content, terms)}</div>
+                 <div class="meta"><span class="badge ${it.role === 'user' ? 'b' : 'g'}">${esc(it.role)}</span><span>${fmtTime(it.time)}</span></div>`;
+        } else if (d.dim === 'persona') {
+          out = `<div class="body"><b>${esc(it.trait)}</b>：${hl(it.value, terms)}</div>
+                 <div class="meta"><span class="badge ${it.kind === 'summary' ? 'g' : 'b'}">${esc(it.kind || 'trait')}</span><span>${it.confidence != null ? '置信 ' + conf(it.confidence) : ''}</span></div>`;
+        } else if (d.dim === 'timeindex') {
+          out = `<div class="body">${hl(it.content, terms)}</div>
+                 <div class="meta"><span class="badge w">重要度 ${meters(it.importance)}</span>
+                 ${it.score != null ? `<span class="badge b">BM25 ${esc(it.score)}</span>` : ''}
+                 ${terms.length ? `<span class="badge">命中词 ${terms.map(t => hl(t, [t])).join(' ')}</span>` : ''}
+                 <span>${fmtTime(it.time)}</span></div>`;
+        } else if (d.dim === 'facts') {
+          out = `<div class="body">${hl(it.fact, terms)}</div>
+                 <div class="meta"><span class="badge b">置信 ${conf(it.confidence)}</span>
+                 ${terms.length ? `<span class="badge">命中词 ${terms.map(t => hl(t, [t])).join(' ')}</span>` : ''}</div>
+                 ${it.source ? `<div class="tm">来源：${esc(it.source)}</div>` : ''}`;
+        } else if (d.dim === 'reflection') {
+          out = `<div class="body">${hl(it.reflection, terms)}</div>
+                 ${it.insight ? `<div class="body" style="color:var(--muted);font-size:12px;margin-top:4px">${esc(it.insight)}</div>` : ''}
+                 <div class="meta"><span class="badge">置信 ${conf(it.confidence)}</span>
+                 ${terms.length ? `<span class="badge">命中词 ${terms.map(t => hl(t, [t])).join(' ')}</span>` : ''}</div>`;
+        } else {
+          out = `<div class="body">${JSON.stringify(it)}</div>`;
+        }
+        return `<div class="item">${out}</div>`;
+      }).join('');
+    }
+    return `<div class="box">
+      <div class="dimhead"><h3>${esc(d.label)}</h3>
+        <span class="badge">${items.length} 条</span>
+        <span class="reason">${esc(d.reason || '')}</span></div>
+      ${body}
+    </div>`;
+  }).join('');
+}
+
+// ── load overview ──
+async function loadOverview() {
+  if (!$('ovLoading').style.display) $('ovLoading').style.display = 'block';
+  $('ovError').style.display = 'none'; $('ovBody').style.display = 'none';
+  try {
+    const r = await fetch('/memory/api?user_id=' + encodeURIComponent(currentUser()));
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (r.statusText || ''));
+    const d = await r.json();
+    renderStats(d.dimensions);
+    renderSummaries(d.dimensions.persona);
+    renderTraits(d.dimensions.persona);
+    renderFacts(d.dimensions.facts);
+    renderReflections(d.dimensions.reflections);
+    renderTimeindex(d.dimensions.timeindex);
+    renderRecent(d.dimensions.recent);
+    $('logCount').textContent = (d.recalls || []).length;
+    $('ovBody').style.display = 'block';
+  } catch (e) {
+    $('ovError').textContent = '加载失败：' + (e.message || e);
+    $('ovError').style.display = 'block';
+  } finally {
+    $('ovLoading').style.display = 'none';
+  }
+}
+
+// ── recall search ──
+async function doSearch() {
+  const q = $('searchQuery').value.trim();
+  const btn = $('searchBtn');
+  if (!q) return;
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+  $('searchResult').innerHTML = '<div class="notice"><span class="spin"></span> 召回中…</div>';
+  try {
+    const r = await fetch('/memory/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: currentUser(), query: q, top_k: 5}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    $('searchResult').innerHTML =
+      `<div class="box">
+        <div class="dimhead"><h3>查询：${esc(d.query)}</h3>
+        <span class="badge b">tokens：${(d.tokens || []).map(t => hl(t, [t])).join(' ') || '–'}</span></div>
+      </div>` +
+      `<div id="searchDims"></div>`;
+    renderTrace(d.dimensions, $('searchDims'));
+    if (d.error) $('searchResult').insertAdjacentHTML('beforeend', `<div class="notice">${esc(d.error)}</div>`);
+  } catch (e) {
+    $('searchResult').innerHTML = `<div class="notice" style="color:var(--err)">搜索失败：${esc(e.message || e)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = '搜索 & 查看召回';
+  }
+}
+
+// ── recall log ──
+async function loadLog() {
+  const listEl = $('logList');
+  listEl.innerHTML = '<div class="notice"><span class="spin"></span> 加载中…</div>';
+  try {
+    const r = await fetch('/memory/api?user_id=' + encodeURIComponent(currentUser()));
+    const d = await r.json();
+    const recalls = d.recalls || [];
+    $('logCount').textContent = recalls.length;
+    if (!recalls.length) {
+      listEl.innerHTML = '<div class="empty">还没有真实聊天记录。去 /chat 聊几句，每次对话的召回过程会出现在这里。</div>';
+      return;
+    }
+    listEl.innerHTML = recalls.map((rec, i) => {
+      const dims = rec.dimensions || [];
+      const dimPills = dims.map(x => `<span class="badge ${x.n ? 'b' : ''}">${esc(x.label)} ${x.n}</span>`).join(' ');
+      return `
+      <details class="recall box" ${i === 0 ? 'open' : ''}>
+        <summary>
+          <span class="badge">${i + 1}</span>
+          <b>${esc(rec.query)}</b>
+          <span class="meta">${fmtTime(rec.ts)} · 上下文 ${rec.context_chars} 字符</span>
+          ${dimPills}
+        </summary>
+        <div class="profile-dims"></div>
+      </details>`;
+    }).join('');
+    recalls.forEach((rec, i) => {
+      const dimEl = listEl.querySelectorAll('details.recall')[i].querySelector('.profile-dims');
+      renderTrace(rec.detail, dimEl);
+    });
+  } catch (e) {
+    listEl.innerHTML = `<div class="notice" style="color:var(--err)">加载失败：${esc(e.message || e)}</div>`;
+  }
+}
+
+// ── clear memory ──
+async function clearMemory() {
+  const u = currentUser();
+  if (!confirm(`确认清空用户「${u}」的全部记忆吗？\n\n包括：工作记忆 / 近期记忆 / 事实 / 反思 / 人格画像 / 召回日志。\n此操作不可恢复！`)) return;
+  const btn = $('clearBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+  try {
+    const headers = {'Content-Type': 'application/json'};
+    const key = currentKey();
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+    const r = await fetch('/memory/clear', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({user_id: u}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    const p = d.persona || {};
+    alert(`已清空「${u}」的记忆。\n工作记忆 ${d.recent ?? '-'} 条 · 近期记忆 ${d.timeindex ?? '-'} 条\n事实 ${d.facts ?? '-'} 条 · 反思 ${d.reflections ?? '-'} 条\n人格特征 ${p.traits ?? '-'} · 摘要 ${p.summaries ?? '-'}`);
+    loadOverview();
+    if (document.querySelector('.tab.active').dataset.tab === 'log') loadLog();
+  } catch (e) {
+    alert('清空失败：' + (e.message || e));
+  } finally {
+    btn.disabled = false; btn.textContent = '清空记忆';
+  }
+}
+
+// ── events ──
+$('searchBtn').addEventListener('click', doSearch);
+$('searchQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+$('userId').addEventListener('change', () => { loadOverview(); if (document.querySelector('.tab.active').dataset.tab === 'log') loadLog(); });
+$('refresh').addEventListener('click', loadOverview);
+$('logRefresh').addEventListener('click', loadLog);
+$('clearBtn').addEventListener('click', clearMemory);
+
+async function health() {
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    liveEl.className = 'dot on';
+    if (d.model) $('model').textContent = d.model;
+  } catch (_) { liveEl.className = 'dot off'; }
+}
+
+loadOverview();
+health();
+setInterval(health, 5000);
+</script>
+</body>
+</html>
