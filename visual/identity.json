@@ -1,0 +1,15 @@
+{
+  "character": "千夜智子",
+  "visual_identity": {
+    "hair": "紫色长发（常扎双丸子头）",
+    "eyes": "淡黄灵眸（棕色系）",
+    "appearance_style": "anime",
+    "age_appearance": "young adult",
+    "clothing_notes": "居家常服 / 学生制服，少女感",
+    "reference_images": [
+      "chizuko_front.png",
+      "chizuko_casual.png",
+      "chizuko_school.png"
+    ]
+  }
+}
