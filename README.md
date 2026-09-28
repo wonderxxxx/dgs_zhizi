@@ -15,9 +15,14 @@ zhizi/
 │   ├── metrics.py         # 运行指标 + 结构化日志（/metrics、SSE 事件源）
 │   ├── memory.py          # 观测笔记 v2：SQLite 持久化 + BM25 倒排检索 + 重要度 + 去重
 │   ├── persona.py         # 人格装配：System Prompt + 记忆 + 历史 + 结构化回复
+│   ├── characters.py      # 角色注册表：prompt 读取（含字面量包装）+ 能力开关
+│   ├── visual_identity.py # 自视身份层：VLM 裸描述 → 属性匹配 → 「图片中可能是我」
 │   ├── actions.py         # 动作/神情描写剥离（按需隐藏）
-│   ├── users.py           # 用户级隔离：每用户独立 Persona + 并发锁
+│   ├── users.py           # 用户级 + 角色级隔离：每 (user, char) 独立 Persona + 并发锁
 │   └── router.py          # 路由层（后置占位：小模型语域/插件判断）
+├── visual/                # 自视身份卡 + 参考图（模型自识别的视觉基准）
+│   ├── identity.json      # 角色视觉特征（发色/瞳色/画风/年龄段/参考图清单）
+│   └── references/        # 参考图（可选：放对应图片后开启「视觉比对」加权）
 ├── static/
 │   └── dashboard.html     # 实时监控单页（GET /dashboard）
 ├── logs/                  # 结构化日志（observability.log_file，自动生成）
@@ -82,6 +87,38 @@ curl -X POST http://127.0.0.1:8765/chat \
   -d '{"message": "还记得我们的暗号吗", "user_id": "alice"}'
 # → 换个设备用同一个 user_id 也能接上记忆；bob 看不到 alice 的任何内容
 
+# 角色级切换：一级用户 / 二级角色，角色互相隔离（人格 + 记忆）
+curl -X POST http://127.0.0.1:8765/chat \
+  -d '{"message": "我现在在危险区，怎么撤离", "user_id": "alice", "character": "白鸥"}'
+curl http://127.0.0.1:8765/characters
+# → {"default": "千夜智子", "characters": [{"name": "千夜智子", ...}, {"name": "白鸥", "memory": false, ...}]}
+# 未指定 character 时落到 config.characters 的默认角色（沿用旧目录 notes/<user_id>/）；
+# 非默认角色落在 notes/<user_id>/<角色名>/，彼此不可见。
+
+# 已知用户清单（notes 落盘目录 ∪ 内存活跃键）——聊天页/记忆页的用户下拉框数据源
+curl http://127.0.0.1:8765/users
+# → {"default": "default", "users": ["default", "dgs", "dgs2", ...]}
+
+# 聊天记录回填：同一 user_id × character 打开会话即拉到此前全部往来（鉴权同 /chat）
+curl "http://127.0.0.1:8765/history?user_id=alice&character=千夜智子&limit=200"
+# → {"user_id":"alice","character":"千夜智子","persisted":true,
+#    "messages":[{"role":"user","content":"…","actions":[],"time":"2026-09-20T21:00:00"},
+#                {"role":"assistant","content":"正文","actions":["（笑）"],"time":"…"}]}
+# 记录落在 notes/<user_id>/<角色>/memory/recent/recent_default.json：跨设备、跨会话、
+# 跨进程重启都在。persisted=false 表示该角色未启用观测笔记（memory: false），
+# 记录只在进程内，重启即失。limit 缺省 100、上限 500（取最近 N 条，正序返回）。
+
+# 图片看得见 + 记得住：发图那一轮 /history 会多两个字段，原文保持干净
+#   images: [{"name":"20260928-111148-7f93bf.png","mime":"image/png"}]  字节在
+#           notes/<user_id>/<角色>/images/，历史只存文件名（不进上下文）
+#   caption: "一个女孩穿着白裙站在樱花树下"  图片内容说明，随该轮进五维记忆
+curl "http://127.0.0.1:8765/history?user_id=alice&character=千夜智子"
+# 拿回原图（鉴权同 /history；name 必须是不含分隔符的纯文件名）
+curl -o out.png "http://127.0.0.1:8765/image?user_id=alice&character=千夜智子&name=20260928-111148-7f93bf.png"
+# 路径穿越（../ 、 x/y.png）一律 404。说明由 VLM 生成：有身份卡时复用「自识别」那次
+# 描述（零额外视觉调用），无卡时单独描述一次，失败降级为空。attachments.caption=false
+# 可关掉（只记 [图片]，图仍然落盘可回看）。清记忆会连带清掉该用户的图片。
+
 # 隐藏动作/神情描写（只拿正文）
 curl -X POST http://127.0.0.1:8765/chat \
   -d '{"message": "哥哥回来了吗", "user_id": "alice", "hide_actions": true}'
@@ -89,6 +126,18 @@ curl -X POST http://127.0.0.1:8765/chat \
 
 curl http://127.0.0.1:8765/health
 # → {"status": "ok", "model": "...", "users": N, "notes": M}
+
+# 自视身份卡（模型自识别基准，GET 观测用）
+curl http://127.0.0.1:8765/identity
+# → {"enabled": true, "threshold": 0.55, "identity": {"character": "千夜智子", "visual_identity": {...}}}
+
+# 发图对话：贴图后智子会先做「自识别」，置信度过阈值才注入“图片中可能是我”
+curl -X POST http://127.0.0.1:8765/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "你看这张图", "user_id": "default", "images": [{"mime": "image/png", "data": "<base64>"}]}'
+# → {"reply": "...", "raw": "...", "image_acked": true,
+#    "attachments": {"images": [{"name": "20260928-111148-7f93bf.png", "mime": "image/png"}],
+#                    "caption": "一个女孩穿着白裙站在樱花树下"}}
 
 # 运行监控
 curl http://127.0.0.1:8765/metrics   # 指标 JSON（计数器/延迟/tok/s/事件）
@@ -115,9 +164,19 @@ curl -X POST http://127.0.0.1:8765/memory/clear \
   跨设备、跨会话共享——她记得你，不管你在哪台设备上；不同用户之间互不可见
   （笔记落盘到 `notes/<user_id>/`）。服务进程内最多常驻 64 个用户，超出按 FIFO 驱逐
   （笔记已落盘，不丢数据）。
+- **角色级隔离（二级）**：`character` 是第二维（缺省默认角色）。每个角色独立 System Prompt
+  与记忆命名空间——默认角色沿用 `notes/<user_id>/` 一级目录，其余角色落盘到
+  `notes/<user_id>/<角色名>/`，互不串味。角色能力可开关（`config.yaml` 的 `characters` 段）：
+  `memory` 关掉即不主动观测用户（观测笔记是智子的专属能力），`visual_identity` 留空即无
+  自视身份卡（白鸥如此）。人物卡支持纯文本/Markdown 或 `SYS_PROMPT = r'''...'''` 包装
+  （无需改卡，零修改接入）。
 - **鉴权（可选）**：`config.yaml` 的 `server.api_key` 非空时，`/chat` 需带请求头
-  `Authorization: Bearer <api_key>`（`/health` 放行，方便探活）。
+  `Authorization: Bearer <api_key>`（`/health` 放行，方便探活）。`/history`
+  （聊天记录是私事）与 `/memory/clear` 同样要求鉴权。
 - **壳子只做 UI**：人格、记忆、红线全在服务端，换壳不动人格。
+- **聊天记录回填**：`GET /history`（`user_id` × `character`）是该会话的「历史真相」——
+  壳子打开会话、切换用户或切换角色时调一次，把 `messages` 灌进界面即可续上上下文；
+  同一对不重复拉（`static/chat.html` 按 `user\x00character` 键去重）。
 
 ## 设计要点
 
@@ -129,6 +188,12 @@ curl -X POST http://127.0.0.1:8765/memory/clear \
   存储为 SQLite（`notes/<user_id>/notes.db`），旧 JSONL 首次启动自动迁移（原文件
   保留为 `notes.jsonl.migrated`）。
 - **短期窗口**：会话历史上限 40 条，防止上下文膨胀。
+- **自视身份层（Self-Identity）**：带 VLM 的模型"认不出自己"时，系统不依赖模型自觉，而是走
+  一条确定性的外挂识别链——用户图片 → 中立 VLM 裸描述（不喂身份信息，避免确认偏误）→
+  属性匹配（visual/identity.json：发色/瞳色/画风/年龄段加权比对）→ 置信度 →
+  超阈值才注入「图片中可能是我」的 system 上下文，让智子按性格自然接话；
+  有参考图时叠加一张「视觉比对」加权融合（0.6 属性 + 0.4 比对）。粒度见 /metrics 的
+  identity_* 事件；任何一步失败都静默降级，不拖垮对话（config: visual_identity 段）。
 - **路由层后置**：默认关闭，小模型语域/插件判断后续接入；当前人格切换完全由主模型
   按 System Prompt 自主执行，不注入外部指令。
 - **红线已在 System Prompt 内置**：模糊边界（不暴露技术本质）、呈现克制（谜团/渴望

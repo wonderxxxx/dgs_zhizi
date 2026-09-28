@@ -71,6 +71,10 @@
     margin-top: 6px; font-size: 12px; color: var(--muted); font-style: italic;
     white-space: pre-wrap; line-height: 1.5;
   }
+  .msg .caption {
+    margin-top: 6px; font-size: 11px; color: var(--muted);
+    border-left: 2px solid var(--border); padding-left: 8px;
+  }
   .msg .time { font-size: 10px; color: var(--muted); margin-top: 4px; opacity: .7; }
   .msg.error .bubble { background: #2a1520; border-color: #5c2438; color: #ff8fa8; }
   .typing { display: inline-flex; gap: 5px; align-items: center; padding: 4px 2px; }
@@ -82,6 +86,7 @@
   .typing i:nth-child(3) { animation-delay: .4s; }
   @keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
   .empty { color: var(--muted); text-align: center; margin-top: 40px; font-size: 13px; }
+  .note { color: var(--muted); text-align: center; font-size: 11px; opacity: .8; }
 
   footer {
     border-top: 1px solid var(--border); background: var(--panel);
@@ -127,17 +132,19 @@
 <header>
   <h1><span id="live" class="dot"></span>千夜智子 · 聊天</h1>
   <div class="controls">
-    <label>用户 <input type="text" id="userId" value="default" spellcheck="false"/></label>
+    <label>用户 <select id="userId" title="切换用户（一级隔离：会话与记忆按 user_id 分开）"></select></label>
+    <label>角色 <select id="charSelect" title="切换角色（一级用户 / 二级角色，记忆互相隔离）"></select></label>
     <label><input type="checkbox" id="hideActions"/> 隐藏动作</label>
     <label>Key <input type="password" id="apiKey" placeholder="无则留空" style="width:90px"/></label>
     <select id="modelSelect" title="切换模型（mlx 场景释放旧引擎、惰性重载）"></select>
     <span class="vision-pill" id="visionPill">…</span>
+    <span class="pill" id="histPill" title="已从服务端拉取的聊天记录条数">…</span>
     <button id="clear" title="仅清空本页显示（服务端记忆不受影响）">清屏</button>
   </div>
 </header>
 
 <div id="messages">
-  <div class="empty" id="empty">和智子打个招呼吧 —— 她记得这个 user_id 的所有过往。</div>
+  <div class="empty" id="empty">打个招呼吧 —— 她记得这个 user_id + 角色 下的所有过往。</div>
 </div>
 
 <footer>
@@ -147,7 +154,7 @@
     <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
     <button id="send">发送</button>
   </div>
-  <div class="hint">人格与记忆在服务端 · 笔记落盘 notes/&lt;user_id&gt;/ · 切换 user_id 即切换记忆空间</div>
+  <div class="hint">人格与记忆在服务端 · 笔记落盘 notes/&lt;user_id&gt;/&lt;角色&gt;/ · 一级用户 × 二级角色，互相隔离</div>
 </footer>
 
 <script>
@@ -156,21 +163,51 @@ const messagesEl = $('messages'), inputEl = $('input'), sendEl = $('send');
 const attachEl = $('attachments'), pickEl = $('pick');
 let busy = false;
 let vision = false;      // 当前模型是否多模态（/health 报告）
+let histKey = '';        // 已拉取历史的 (user × character) 键：同一对不重复拉
 const pendingImgs = [];  // 已选但未发送的图片 {dataUrl, mime, data}
 
-const savedUser = localStorage.getItem('zhizi_user_id');
-if (savedUser) $('userId').value = savedUser;
+const NEW_USER = '＋ 新用户…';
+let userName = (localStorage.getItem('zhizi_user_id') || '').trim() || 'default';
+let userList = ['default'];   // 服务端已知用户（GET /users）
+const extraUsers = [];        // 本页新建、服务端尚未落盘的用户
 const savedKey = localStorage.getItem('zhizi_api_key');
 if (savedKey) $('apiKey').value = savedKey;
+let charName = localStorage.getItem('zhizi_character') || '';
 
-$('userId').addEventListener('change', () => {
-  localStorage.setItem('zhizi_user_id', $('userId').value.trim() || 'default');
+$('userId').addEventListener('change', (e) => {
+  const sel = e.target;
+  if (sel.value === NEW_USER) {
+    const v = (prompt('新用户 id（她的会话与记忆将独立于其他人）') || '').trim();
+    if (!v) { sel.value = userName; return; }
+    if (!extraUsers.includes(v)) extraUsers.push(v);
+    userName = v;
+    sel.dataset.sig = '';   // 强制重绘
+    renderUsers();
+    loadHistory();
+    return;
+  }
+  userName = sel.value || 'default';
+  localStorage.setItem('zhizi_user_id', userName);
+  loadHistory();
 });
 $('apiKey').addEventListener('change', () => {
   localStorage.setItem('zhizi_api_key', $('apiKey').value.trim());
+  loadHistory(true);   // Key 之前填错导致 401：改对后重拉一次
+});
+$('charSelect').addEventListener('change', () => {
+  charName = $('charSelect').value;
+  localStorage.setItem('zhizi_character', charName);
+  loadHistory();
 });
 
 function now() { return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
+
+function stampOf(iso) {
+  // 历史消息带服务端 ISO 时间戳；缺失或坏格式时退回本地当前时间
+  if (!iso) return now();
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? now() : d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+}
 
 function escapeHtml(s) {
   return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
@@ -212,11 +249,23 @@ pickEl.addEventListener('click', () => {
   input.click();
 });
 
-function addMsg(role, text, actions) {
+function appendCaption(el, caption) {
+  if (!caption) return;
+  const c = document.createElement('div');
+  c.className = 'caption';
+  c.textContent = '图片内容：' + caption;
+  el.appendChild(c);
+}
+
+function addMsg(role, text, actions, meta) {
+  // meta: {ts, images:[{name,mime}], caption}——历史回填用（服务端给的原图 + 内容说明）
+  meta = meta || {};
   $('empty')?.remove();
   const el = document.createElement('div');
   el.className = 'msg ' + role;
-  const who = role === 'user' ? ($('userId').value.trim() || 'default') : '智子';
+  const who = role === 'user'
+    ? userName
+    : (charName || '智子');
   let html = `<div class="who">${escapeHtml(who)}</div><div class="bubble"></div>`;
   el.innerHTML = html;
   el.querySelector('.bubble').textContent = text;
@@ -226,9 +275,23 @@ function addMsg(role, text, actions) {
     a.textContent = actions.join('\n');
     el.appendChild(a);
   }
+  if (meta.caption) {
+    appendCaption(el, meta.caption);
+  }
+  if (meta.images && meta.images.length) {
+    const bubble = el.querySelector('.bubble');
+    const frag = document.createDocumentFragment();
+    meta.images.forEach((ref) => {
+      const img = document.createElement('img');
+      img.alt = '图片';
+      frag.appendChild(img);
+      fillImage(img, ref);
+    });
+    bubble.insertBefore(frag, bubble.firstChild);
+  }
   const t = document.createElement('div');
   t.className = 'time';
-  t.textContent = now();
+  t.textContent = meta.ts ? stampOf(meta.ts) : now();
   el.appendChild(t);
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -249,9 +312,18 @@ function addMsgWithImages(role, imgs, text, actions) {
 function addTyping() {
   const el = document.createElement('div');
   el.className = 'msg bot';
-  el.innerHTML = `<div class="who">智子</div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>`;
+  el.innerHTML = `<div class="who">${escapeHtml(charName || '智子')}</div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>`;
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  return el;
+}
+
+function addNote(text) {
+  $('empty')?.remove();
+  const el = document.createElement('div');
+  el.className = 'note';
+  el.textContent = text;
+  messagesEl.appendChild(el);
   return el;
 }
 
@@ -259,6 +331,79 @@ function setBusy(v) {
   busy = v;
   sendEl.disabled = v;
   inputEl.disabled = v;
+}
+
+function authHeaders() {
+  const h = {'Content-Type': 'application/json'};
+  const key = $('apiKey').value.trim();
+  if (key) h['Authorization'] = 'Bearer ' + key;
+  return h;
+}
+
+function histKeyOf() { return userName + '\u0000' + (charName || ''); }
+
+// 历史里的原图：走 /image（要带鉴权头，<img> 带不了）→ blob URL
+const imageUrls = [];
+function releaseImages() {
+  while (imageUrls.length) URL.revokeObjectURL(imageUrls.pop());
+}
+async function fillImage(img, ref) {
+  try {
+    const q = new URLSearchParams({user_id: userName, name: ref.name});
+    if (charName) q.set('character', charName);
+    const r = await fetch('/image?' + q.toString(), {headers: authHeaders()});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const url = URL.createObjectURL(await r.blob());
+    imageUrls.push(url);
+    img.src = url;
+  } catch (_) {
+    const miss = document.createElement('div');
+    miss.className = 'no-vision';
+    miss.textContent = '（原图读不到，可能已被清理）';
+    img.replaceWith(miss);
+  }
+}
+
+async function loadHistory(force) {
+  // 同一 (user_id, character) 只拉一次：换用户/换角色/换 Key 时才重拉（force）
+  if (busy) return;  // 正在对话：不打断本轮气泡
+  const key = histKeyOf();
+  if (!force && key === histKey) return;
+  try {
+    const q = new URLSearchParams({user_id: userName, limit: '200'});
+    if (charName) q.set('character', charName);
+    const r = await fetch('/history?' + q.toString(), {headers: authHeaders()});
+    const d = await r.json();
+    // 键未变才记账（含 HTTP 错误：避免鉴权失败时每 5s 轮询重试）；
+    // 期间切了用户/角色则这次结果作废，交给新键那一次拉取。
+    const stale = !currentKeyIs(key);
+    if (!stale) histKey = key;
+    if (stale || !r.ok) return;
+    renderHistory(d);
+  } catch (_) {
+    // 网络/服务未就绪：不改键，交给下一轮轮询重试
+  }
+}
+
+function currentKeyIs(key) { return histKeyOf() === key; }
+
+function renderHistory(d) {
+  const msgs = Array.isArray(d.messages) ? d.messages : [];
+  releaseImages();
+  messagesEl.innerHTML = '';
+  $('histPill').textContent = msgs.length ? `历史 ${msgs.length}` : '无历史';
+  if (!msgs.length) {
+    messagesEl.innerHTML = `<div class="empty" id="empty">${
+      d.persisted ? '这个 user_id × 角色还没有往来 —— 打个招呼吧。'
+                  : '该角色不启用观测笔记（记录不落盘，仅当前进程有效）。'}</div>`;
+    return;
+  }
+  msgs.forEach((m) => addMsg(m.role, m.content, m.actions,
+    {ts: m.time, images: m.images, caption: m.caption}));
+  if (!d.persisted) {
+    addNote('该角色未启用观测笔记：历史只在当前进程内，重启即失。');
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 async function send() {
@@ -276,16 +421,15 @@ async function send() {
   if (imgs.length && !vision) {
     note = '（当前模型不支持多模态，图片仅预览未发送）';
   }
-  addMsgWithImages('user', shownImgs, note ? (text ? text + '\n' + note : note) : text);
+  const sent = addMsgWithImages('user', shownImgs, note ? (text ? text + '\n' + note : note) : text);
   setBusy(true);
   const typing = addTyping();
   try {
-    const headers = {'Content-Type': 'application/json'};
-    const key = $('apiKey').value.trim();
-    if (key) headers['Authorization'] = 'Bearer ' + key;
+    const headers = authHeaders();
     const payload = {
       message: text,
-      user_id: $('userId').value.trim() || 'default',
+      user_id: userName,
+      character: charName || undefined,
       hide_actions: $('hideActions').checked,
     };
     if (imgs.length && vision) payload.attachments = sendImgs;
@@ -301,12 +445,17 @@ async function send() {
     if (imgs.length && vision && data.image_acked === false) {
       addMsg('error', '服务端未受理图片（模型不支持多模态）');
     }
+    // 服务端已把图落盘 + 写了内容说明：立刻补上（刷新后也能看到）
+    if (data.attachments && data.attachments.caption) {
+      appendCaption(sent, data.attachments.caption);
+    }
     addMsg('bot', data.reply || '(空回复)', data.actions);
   } catch (e) {
     typing.remove();
     addMsg('error', '出错了：' + (e.message || e));
   } finally {
     setBusy(false);
+    if (!currentKeyIs(histKey)) loadHistory();  // 对话期间切了用户/角色：补拉新的一对
     inputEl.focus();
   }
 }
@@ -320,7 +469,9 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
 });
 $('clear').addEventListener('click', () => {
+  releaseImages();
   messagesEl.innerHTML = '<div class="empty" id="empty">已清屏（服务端记忆保留）。</div>';
+  $('histPill').textContent = '已清屏';
 });
 
 async function loadModels() {
@@ -380,6 +531,62 @@ $('modelSelect').addEventListener('change', async (e) => {
   }
 });
 
+function renderUsers() {
+  const sel = $('userId');
+  const list = userList.slice();
+  if (userName && !list.includes(userName)) list.push(userName);
+  sel.innerHTML = '';
+  list.forEach((u) => {
+    const opt = document.createElement('option');
+    opt.value = u;
+    opt.textContent = u;
+    sel.appendChild(opt);
+  });
+  const add = document.createElement('option');
+  add.value = NEW_USER;
+  add.textContent = NEW_USER;
+  sel.appendChild(add);
+  sel.value = userName;
+  localStorage.setItem('zhizi_user_id', userName);
+}
+
+async function loadUsers() {
+  try {
+    const r = await fetch('/users');
+    const d = await r.json();
+    if (!Array.isArray(d.users)) return;
+    const sel = $('userId');
+    const sig = [d.users, extraUsers, userName].join(' ');
+    if (sel.dataset.sig === sig) return;  // 清单没变：不动 DOM，避免打断正在操作的下拉
+    sel.dataset.sig = sig;
+    userList = d.users;
+    renderUsers();
+    loadHistory();
+  } catch (_) { /* 服务未就绪时忽略 */ }
+}
+
+async function loadChars() {
+  try {
+    const r = await fetch('/characters');
+    const d = await r.json();
+    if (!Array.isArray(d.characters)) return;
+    const sel = $('charSelect');
+    sel.innerHTML = '';
+    d.characters.forEach((c) => {
+      const opt = document.createElement('option');
+      opt.value = c.name;
+      opt.textContent = c.name + (c.default ? '（默认）' : '');
+      sel.appendChild(opt);
+    });
+    if (charName && Array.from(sel.options).some((o) => o.value === charName)) {
+      sel.value = charName;
+    }
+    charName = sel.value || '';
+    localStorage.setItem('zhizi_character', charName);
+    loadHistory();
+  } catch (_) { /* 服务未就绪时忽略 */ }
+}
+
 async function health() {
   try {
     const r = await fetch('/health');
@@ -396,7 +603,10 @@ async function health() {
 }
 health();
 loadModels();
-setInterval(() => { health(); loadModels(); }, 5000);
+loadChars();
+loadUsers();
+loadHistory();   // 打开页面：拉该 user_id × 角色的既有聊天记录（loadChars 定下角色后会校正一次）
+setInterval(() => { health(); loadModels(); loadChars(); loadUsers(); }, 5000);
 inputEl.focus();
 </script>
 </body>

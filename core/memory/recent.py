@@ -12,10 +12,15 @@ import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+from ..attachments import with_caption
+
 
 class RecentMemory:
     """工作记忆管理器。"""
-    
+
+    _PREFIX = "recent_"
+    _SUFFIX = ".json"
+
     def __init__(self, memory_dir: str, llm_client=None, max_items: int = 50):
         """
         Args:
@@ -37,7 +42,8 @@ class RecentMemory:
     
     def _get_path(self, user_id: str) -> str:
         """获取用户记忆文件路径。"""
-        return os.path.join(self.memory_dir, f"recent_{user_id}.json")
+        return os.path.join(self.memory_dir,
+                            f"{self._PREFIX}{user_id}{self._SUFFIX}")
     
     def _load_all(self):
         """加载所有用户的记忆。"""
@@ -45,8 +51,9 @@ class RecentMemory:
             return
             
         for filename in os.listdir(self.memory_dir):
-            if filename.startswith("recent_") and filename.endswith(".json"):
-                user_id = filename[6:-5]  # 去掉前缀和后缀
+            if filename.startswith(self._PREFIX) and filename.endswith(self._SUFFIX):
+                # 按前后缀长度切片取 user_id（勿写死下标：前缀 recent_ 是 7 个字符）
+                user_id = filename[len(self._PREFIX):-len(self._SUFFIX)]
                 filepath = os.path.join(self.memory_dir, filename)
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
@@ -125,8 +132,8 @@ class RecentMemory:
         
         for msg in reversed(messages):
             role = msg["role"]
-            content = msg["content"]
-            part = f"{role}: {content}"
+            # 带图的消息：补上图片内容说明，她才知道上一轮你给她看了什么
+            part = f"{role}: {with_caption(msg['content'], msg.get('caption'))}"
             
             if total_chars + len(part) > char_limit:
                 break

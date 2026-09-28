@@ -16,6 +16,7 @@ from .timeindex import TimeIndexedMemory
 from .facts import FactMemory
 from .reflection import ReflectionMemory
 from .persona import PersonaMemory
+from ..attachments import with_caption
 
 
 class MemoryManager:
@@ -58,13 +59,18 @@ class MemoryManager:
             llm_client=llm_client
         )
     
-    def process_message(self, user_id: str, role: str, content: str) -> Dict[str, Any]:
+    def process_message(self, user_id: str, role: str, content: str,
+                        images: List[Dict[str, str]] = None,
+                        caption: str = None) -> Dict[str, Any]:
         """处理一条消息，更新所有相关记忆。
         
         Args:
             user_id: 用户ID
             role: 消息角色 (user/assistant)
             content: 消息内容
+            images: 图片引用 [{name, mime}]（只存工作记忆，取图走 /image）
+            caption: 图片内容说明：工作记忆单列一个字段给界面看，
+                     检索与事实提取则用「原文 + 说明」的文本
             
         Returns:
             处理结果摘要
@@ -76,14 +82,20 @@ class MemoryManager:
             "persona": None
         }
         
-        # 1. 添加到工作记忆
-        self.recent.add_message(user_id, role, content)
+        # 1. 添加到工作记忆（图片引用与说明分列，原文保持干净）
+        extra = {}
+        if images:
+            extra["images"] = images
+        if caption:
+            extra["caption"] = caption
+        self.recent.add_message(user_id, role, content, **extra)
         result["recent"] = True
         
-        # 2. 添加到近期记忆
+        # 2. 添加到近期记忆（带图片说明的文本，BM25 检索才搜得到"那张图"）
+        recall_text = with_caption(content, caption)
         self.timeindex.add(
             user_id=user_id,
-            content=content,
+            content=recall_text,
             category="conversation",
             importance=5 if role == "user" else 3
         )
@@ -93,7 +105,7 @@ class MemoryManager:
             # 获取最近的对话上下文
             recent_messages = self.recent.get_messages(user_id, limit=5)
             conversation = "\n".join([
-                f"{msg['role']}: {msg['content']}" 
+                f"{msg['role']}: {with_caption(msg.get('content', ''), msg.get('caption'))}"
                 for msg in recent_messages
             ])
             
@@ -150,7 +162,10 @@ class MemoryManager:
             "label": "工作记忆",
             "reason": "最近对话按时间窗口注入，不做语义评分",
             "items": [
-                {"role": m.get("role", ""), "content": m.get("content", ""),
+                {"role": m.get("role", ""),
+                 "content": with_caption(m.get("content", ""), m.get("caption")),
+                 "caption": m.get("caption", ""),
+                 "images": m.get("images") or [],
                  "time": m.get("timestamp", ""), "matched_terms": []}
                 for m in recent_msgs
             ],

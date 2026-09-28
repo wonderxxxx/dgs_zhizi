@@ -4,26 +4,66 @@ import time
 from collections import deque
 from datetime import datetime
 
+from . import attachments
 from .actions import split_reply
 from .llm import LLMClient
 from .metrics import logger, metrics
 
 
 class Persona:
-    def __init__(self, config, llm=None, note_dir=None, memory_manager=None):
+    def __init__(self, config, llm=None, note_dir=None, memory_manager=None,
+                 character=None):
         """llm / note_dir / memory_manager 可注入：
         - 多用户服务端共享一个 LLMClient，避免重复建连；
         - note_dir 指定该用户的独立笔记目录（用户级隔离）；
-        - memory_manager 五维记忆管理器实例。"""
-        with open(config["system_prompt"], encoding="utf-8") as fh:
-            self.system_prompt = fh.read().strip()
+        - memory_manager 五维记忆管理器实例（None = 不主动观测记忆）；
+        - character 角色规格（core.characters.CharacterSpec）；None = 旧版单角色模式：
+          读 config.system_prompt + 全局 visual_identity.card。"""
+        if character is not None:
+            self.character = character.name
+            self.system_prompt = (character.prompt_text or "").strip() or \
+                self._read_prompt_file(character.prompt_path)
+        else:
+            self.character = "default"
+            self.system_prompt = self._read_prompt_file(config["system_prompt"])
         self.llm = llm if llm is not None else LLMClient(config)
         self.memory_manager = memory_manager
+        # 附件（图片）落盘根目录 = 该用户 × 该角色的记忆命名空间
+        self.note_dir = note_dir or (config.get("memory") or {}).get("note_file") or ""
+        self.caption_images = bool((config.get("attachments") or {}).get("caption", True))
+        self.visual_identity = None
+        try:
+            from .visual_identity import VisualIdentity
+
+            # 按角色注入自视身份卡；空卡路径（如白鸥）→ 自识别关闭。
+            # 旧版单角色模式原样传 config（visual_identity 段不变，兼容默认回退）。
+            if character is not None:
+                vis_cfg = dict(config.get("visual_identity") or {})
+                vis_cfg["card"] = character.visual_identity or ""
+                char_cfg = dict(config)
+                char_cfg["visual_identity"] = vis_cfg
+            else:
+                char_cfg = config
+            self.visual_identity = VisualIdentity(char_cfg, self.llm)
+        except Exception as exc:
+            # 自识别是可选项，加载失败不影响对话
+            logger.warning("visual identity 装配失败: %s", exc)
+            self.visual_identity = None
         self.history = []  # 短期记忆窗口
+        self.last_attachments = {}  # 最近一轮的图片：{images:[{name,mime}], caption}
         self.recall_log = deque(maxlen=50)  # 每轮聊天的记忆召回 trace（供观测界面）
 
-    def build_messages(self, user_input):
+    @staticmethod
+    def _read_prompt_file(path):
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+
+    def build_messages(self, user_input, self_context=""):
         system_content = self.system_prompt
+
+        # 自我识别上下文（图片中「可能是我」）并入 system，尊重「首条 system」约定
+        if self_context:
+            system_content += "\n\n" + self_context
 
         # 使用五维记忆系统获取上下文（查询驱动召回，附带回溯 trace）
         if self.memory_manager:
@@ -38,9 +78,14 @@ class Persona:
                 )
             self._record_recall(user_input, context, trace)
         else:
-            # 兼容旧版：使用简单历史
+            # 兼容旧版：使用简单历史（带图消息补上图片内容说明）
             messages = [{"role": "system", "content": system_content}]
-            messages.extend(self.history[-10:])  # 只保留最近10条
+            for m in self.history[-10:]:  # 只保留最近10条
+                messages.append({
+                    "role": m["role"],
+                    "content": attachments.with_caption(m.get("content", ""),
+                                                        m.get("caption")),
+                })
             messages.append({"role": "user", "content": user_input})
             return messages
 
@@ -76,25 +121,39 @@ class Persona:
         return list(self.recall_log)[-limit:][::-1]
 
     def clear_memory(self):
-        """清空该用户的全部记忆：五维持久化 + 短期窗口 + 召回日志。返回各维度删除计数。"""
+        """清空该用户的全部记忆：五维持久化 + 短期窗口 + 召回日志 + 图片。返回各维度删除计数。"""
         cleared = {}
         if self.memory_manager:
             cleared = self.memory_manager.clear(user_id="default")
         self.history = []
         self.recall_log.clear()
+        cleared["images"] = attachments.clear(self.note_dir)  # 附件同属这轮记忆
         return cleared
 
     def reply(self, user_input, images=None):
         t0 = time.perf_counter()
         metrics.inc("chat_turns")
-        messages = self.build_messages(user_input)
+        # 图片自识别：VLM 裸描述 → 属性匹配 → 置信度 ≥ 阈值才注入「可能是我」上下文
+        self_context = ""
+        described = None
+        if images and getattr(self, "visual_identity", None) is not None:
+            self_context = self.visual_identity.analyze(images) or ""
+            described = getattr(self.visual_identity, "last_described", None)
+        messages = self.build_messages(user_input, self_context=self_context)
         # 仅在确有附件时传 images，兼容旧 fake/接口
         reply_text = self.llm.chat(messages, images=images) if images \
             else self.llm.chat(messages)
 
-        # 更新历史
-        self.history.append({"role": "user", "content": user_input})
-        self.history.append({"role": "assistant", "content": reply_text})
+        # 图片：字节落盘（刷新后还在）+ 一句话说明（进记忆，她记得你给她看过什么）
+        refs = attachments.save_images(self.note_dir, images) if images else []
+        cap = ""
+        if refs and self.caption_images:
+            cap = attachments.caption(self.llm, images, described)
+        self.last_attachments = ({"images": refs, "caption": cap} if refs else {})
+
+        # 更新历史（图片引用与说明分列，原文保持干净）
+        self.history.append(self._msg("user", user_input, refs, cap))
+        self.history.append(self._msg("assistant", reply_text))
         if len(self.history) > 40:  # 短期窗口上限，防上下文膨胀
             self.history = self.history[-40:]
 
@@ -105,7 +164,9 @@ class Persona:
                 result = self.memory_manager.process_message(
                     user_id="default",
                     role="user",
-                    content=user_input
+                    content=user_input,
+                    images=refs,
+                    caption=cap,
                 )
                 # 也可以处理助手回复
                 self.memory_manager.process_message(
@@ -133,14 +194,62 @@ class Persona:
         )
         return reply_text
 
+    @staticmethod
+    def _msg(role, content, images=None, caption=""):
+        """一条消息：图片引用与内容说明只在有值时挂上（保持历史 JSON 干净）。"""
+        msg = {"role": role, "content": content}
+        if images:
+            msg["images"] = images
+        if caption:
+            msg["caption"] = caption
+        return msg
+
+    def get_history(self, limit=50):
+        """该用户 × 该角色的聊天记录（正序，供壳子回填界面）。
+
+        启用观测笔记的角色读工作记忆落盘数据——跨设备、跨会话、跨进程重启都在；
+        未启用的角色（memory=False）无落盘，退回进程内短期窗口（重启即失）。
+        助手消息按原文重拆「正文 / 动作」；压缩产生的 system 摘要行只给模型看，不上界面。
+        带图消息附 images（走 GET /image 取原图）与 caption（图片内容说明）。
+        """
+        if self.memory_manager:
+            raw = self.memory_manager.recent.get_messages("default", limit=limit)
+            persisted = True
+        else:
+            raw = self.history[-limit:]
+            persisted = False
+        messages = []
+        for msg in raw:
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = msg.get("content", "")
+            actions = []
+            if role == "assistant":
+                content, actions = split_reply(content)
+            if not content and not actions and not msg.get("images"):
+                continue  # 纯图片消息（无文字）也要留住
+            out = {"role": role, "content": content, "actions": actions,
+                   "time": msg.get("timestamp", "")}
+            if msg.get("images"):
+                out["images"] = msg["images"]
+            if msg.get("caption"):
+                out["caption"] = msg["caption"]
+            messages.append(out)
+        return {"messages": messages, "persisted": persisted}
+
     def reply_structured(self, user_input, images=None):
         """壳子友好版：返回 {reply(正文), actions(动作列表), raw(原文)}。
 
         历史与笔记仍以原文(raw)记录，保证上下文连续；展示层按需取字段。
+        带图的轮次另附 attachments（落盘引用 + 图片内容说明）。
         """
         raw = self.reply(user_input, images=images)
         content, actions = split_reply(raw)
-        return {"reply": content, "actions": actions, "raw": raw}
+        result = {"reply": content, "actions": actions, "raw": raw}
+        if self.last_attachments:
+            result["attachments"] = self.last_attachments
+        return result
 
     def get_memory_stats(self):
         """获取记忆统计信息。"""

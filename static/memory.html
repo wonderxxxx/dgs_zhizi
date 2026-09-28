@@ -32,6 +32,12 @@
     border-radius: 8px; padding: 6px 10px; font: inherit; width: 110px; outline: none;
   }
   input:focus { border-color: var(--accent); }
+  select {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 12px; outline: none;
+    max-width: 200px;
+  }
+  select:focus { border-color: var(--accent); }
   button.danger { color: var(--err); }
   button.danger:hover { border-color: var(--err); color: var(--err); }
   button {
@@ -123,7 +129,7 @@
 <header>
   <h1><span id="live" class="dot"></span>千夜智子 · 记忆观察</h1>
   <div class="controls">
-    <label>用户 <input type="text" id="userId" value="default" spellcheck="false"/></label>
+    <label>用户 <select id="userId" title="切换用户（一级隔离：记忆按 user_id 分开）"></select></label>
     <button id="refresh">刷新</button>
     <label>Key <input type="password" id="apiKey" placeholder="无则留空" style="width:90px"/></label>
     <button id="clearBtn" class="danger" title="清空该用户全部记忆（不可恢复）">清空记忆</button>
@@ -188,14 +194,49 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const liveEl = $('live');
-const savedUser = localStorage.getItem('zhizi_mem_user');
-if (savedUser) $('userId').value = savedUser;
+const NEW_USER = '＋ 新用户…';
+let userName = (localStorage.getItem('zhizi_mem_user') || '').trim() || 'default';
+let userList = ['default'];   // 服务端已知用户（GET /users）
+const extraUsers = [];        // 本页新建、服务端尚未落盘的用户
 const savedKey = localStorage.getItem('zhizi_mem_key');
 if (savedKey) $('apiKey').value = savedKey;
-function currentUser() { const u = ($('userId').value || 'default').trim() || 'default';
+function currentUser() { const u = userName || 'default';
   localStorage.setItem('zhizi_mem_user', u); return u; }
 function currentKey() { const k = $('apiKey').value.trim();
   localStorage.setItem('zhizi_mem_key', k); return k; }
+
+function renderUsers() {
+  const sel = $('userId');
+  const list = userList.slice();
+  if (userName && !list.includes(userName)) list.push(userName);
+  sel.innerHTML = '';
+  list.forEach((u) => {
+    const opt = document.createElement('option');
+    opt.value = u;
+    opt.textContent = u;
+    sel.appendChild(opt);
+  });
+  const add = document.createElement('option');
+  add.value = NEW_USER;
+  add.textContent = NEW_USER;
+  sel.appendChild(add);
+  sel.value = userName;
+  localStorage.setItem('zhizi_mem_user', userName);
+}
+
+async function loadUsers() {
+  try {
+    const r = await fetch('/users');
+    const d = await r.json();
+    if (!Array.isArray(d.users)) return;
+    const sel = $('userId');
+    const sig = [d.users, extraUsers, userName].join(' ');
+    if (sel.dataset.sig === sig) return;  // 清单没变：不动 DOM，避免打断正在操作的下拉
+    sel.dataset.sig = sig;
+    userList = d.users;
+    renderUsers();
+  } catch (_) { /* 服务未就绪时忽略 */ }
+}
 
 // ── tabs ──
 document.querySelectorAll('.tab').forEach(tab => {
@@ -470,7 +511,22 @@ async function clearMemory() {
 // ── events ──
 $('searchBtn').addEventListener('click', doSearch);
 $('searchQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
-$('userId').addEventListener('change', () => { loadOverview(); if (document.querySelector('.tab.active').dataset.tab === 'log') loadLog(); });
+$('userId').addEventListener('change', (e) => {
+  const sel = e.target;
+  if (sel.value === NEW_USER) {
+    const v = (prompt('新用户 id（记忆将独立于其他人）') || '').trim();
+    if (!v) { sel.value = userName; return; }
+    if (!extraUsers.includes(v)) extraUsers.push(v);
+    userName = v;
+    sel.dataset.sig = '';   // 强制重绘
+    renderUsers();
+  } else {
+    userName = sel.value || 'default';
+    localStorage.setItem('zhizi_mem_user', userName);
+  }
+  loadOverview();
+  if (document.querySelector('.tab.active').dataset.tab === 'log') loadLog();
+});
 $('refresh').addEventListener('click', loadOverview);
 $('logRefresh').addEventListener('click', loadLog);
 $('clearBtn').addEventListener('click', clearMemory);
@@ -485,8 +541,9 @@ async function health() {
 }
 
 loadOverview();
+loadUsers();
 health();
-setInterval(health, 5000);
+setInterval(() => { health(); loadUsers(); }, 5000);
 </script>
 </body>
 </html>

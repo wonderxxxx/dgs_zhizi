@@ -28,6 +28,34 @@ memory:
   note_file: "notes"        # 「观测笔记」目录（每用户一个子目录，内含 notes.db）
   top_k: 5                  # 每轮最多注入的笔记条数
 
+attachments:
+  caption: true             # 图片内容一句话说明（VLM 描述）：随该轮写进记忆，她记得你给她看过什么
+                            # false = 只记 [图片] 不做描述（省一次视觉调用；图仍然落盘可回看）
+                            # 落盘位置 notes/<user_id>/<角色>/images/，历史只存文件名（不进上下文）
+
+visual_identity:
+  card: "visual/identity.json"        # 自视身份卡：角色视觉特征（字符级置信度匹配基准）
+  reference_dir: "visual/references"  # 参考图目录（可选：配合身份卡 reference_images，做视觉比对）
+  threshold: 0.55                     # 置信度 ≥ 此值 → 判定「图片中可能有我」
+
+# ── 角色注册表（一级：用户 / 二级：角色）────────────────────────────
+# 每个角色独立 System Prompt + 独立记忆命名空间（notes/<user_id>/<角色>/）：
+# - prompt:          人物卡文件（纯文本 / Markdown，或 `SYS_PROMPT = r'''...'''` 包装，无需改卡）
+# - visual_identity: 自视身份卡路径；留空 = 该角色无自视身份（不自识别）
+# - memory:          是否启用「观测笔记」五维记忆（主动观测用户是智子的专属能力）
+# - default:         默认角色（一次请求角色留空时落到它，并沿用一级目录 notes/<user_id>）
+characters:
+  千夜智子:
+    prompt: "prompts/zhizi_v1.md"
+    visual_identity: "visual/identity.json"
+    memory: true
+    default: true
+  白鸥:
+    prompt: "prompts/白鸥人物卡-万物皆数定制版.txt"
+    visual_identity: ""       # 无自视身份卡
+    memory: false             # 不主动观测用户（观测笔记是智子专有）
+
+# 旧版单角色回退（无 characters 段时生效）
 system_prompt: "prompts/zhizi_v1.md"
 
 router:
