@@ -2,16 +2,22 @@
 # 切换调用方式只需改 provider 段；代码零改动。
 
 provider:
-  type: mlx                   # api = 云端 API；local = 本地服务（Ollama / LM Studio）；mlx = 进程内推理（Apple Silicon，不起服务）
-  # —— mlx（进程内）：model 为 HF 仓库或本地 MLX 权重路径 ——
-  model: "/Users/dango_studio/.lmstudio/models/lmstudio-community/Qwen3.8-27B-MLX-4bit"
-#  model: "/Users/dango_studio/.lmstudio/models/lmstudio-community/Qwen3-Next-80B-A3B-Instruct-MLX-4bit"
-#  model: "/Users/dango_studio/.lmstudio/models/lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit"
+  type: openvino              # api = 云端 API；local = 本地服务（Ollama / LM Studio）；
+                              # mlx = Apple Silicon 进程内推理；openvino = Intel 进程内推理
+  # —— openvino（Intel 进程内，本分支默认）：model 为 Optimum 导出的 OpenVINO IR 目录 ——
+  model: "D:/ov_uv_llm/qwen2-7b-int4-ov"    # 纯文本（LLMPipeline）
+#  model: "D:/ov_uv_llm/gemma3-12b-int8-ov"  # 多模态：带视觉塔，走 VLMPipeline（吃 ~13GB 内存）
+  device: "GPU"               # GPU = Intel 核显（本机实测 ~9.5 tok/s）；CPU ~2.8 tok/s；NPU 不支持 LLM
+  properties:                 # 直通 openvino-genai 的设备属性
+    CACHE_DIR: "ov_cache"     # GPU 首次编译约 1 分钟并落盘，之后命中缓存 ~5s 启动
   temperature: 0.85
   max_tokens: 1024            # 单次回复生成上限
   enable_thinking: false      # 对话关思考：更快；true 时需加大 max_tokens，防思考截断空回复
-  multimodal: auto            # auto=按权重检测（mlx_vlm）；true/false 强制开启/关闭多模态
-  model_dir: "/Users/dango_studio/.lmstudio/models/lmstudio-community"  # 模型切换器扫描目录
+  multimodal: auto            # auto=按 IR 目录有无 openvino_vision_embeddings_model.xml 判定
+  model_dir: "D:/ov_uv_llm"   # 模型切换器扫描目录（POST /model 用）
+
+  # —— mlx（Apple Silicon 进程内）：type 改 mlx 并换成下面配置 ——
+  # model: "/Users/dango_studio/.lmstudio/models/lmstudio-community/Qwen3.8-27B-MLX-4bit"
 
   # —— 本地服务示例：type 改 local 并换成下面配置 ——
   # base_url: "http://localhost:1234/v1"   # LM Studio

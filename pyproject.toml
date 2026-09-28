@@ -6,6 +6,8 @@ dependencies = [
     "mlx-lm>=0.31.3",
     "mlx-vlm>=0.7.2",
     "openai>=3.14.1",
+    "openvino-genai>=2025.4.0 ; sys_platform != 'darwin'",
+    "pillow>=12.3.0 ; sys_platform != 'darwin'",
     "pyyaml>=6.0.3",
 ]
 

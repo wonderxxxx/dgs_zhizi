@@ -69,6 +69,64 @@ uv run --with openai --with pyyaml python main.py
 
 改 `config.yaml`：`provider.type` 改 `local`，`base_url` 改 `http://localhost:11434/v1`，`model` 改 `qwen2.5:7b`。
 
+### Intel OpenVINO（本分支默认）
+
+本分支 `provider.type: openvino`——进程内推理，不起外部服务，走 `core/llm.py` 的
+`_OpenVINOExecutor`（专用推理线程，与 `_MlxExecutor` 同构）。
+
+```bash
+uv sync                       # 会装 openvino-genai + pillow（sys_platform != darwin）
+PYTHONUTF8=1 uv run python tests/test_openvino.py   # 纯逻辑测试，不加载模型
+uv run python main.py         # 或 uv run python api.py --port 8765
+```
+
+```yaml
+# config.yaml 的 provider 段
+provider:
+  type: openvino
+  model: "D:/ov_uv_llm/qwen2-7b-int4-ov"   # Optimum 导出的 OpenVINO IR 目录
+  device: "GPU"                             # CPU / GPU / NPU
+  properties:                               # 直通 openvino-genai 的设备属性
+    CACHE_DIR: "ov_cache"                   # GPU 编译产物落盘（~5GB，已 gitignore）
+  multimodal: auto                          # 按 IR 目录有无视觉塔判定
+  model_dir: "D:/ov_uv_llm"                 # POST /model 的扫描目录
+```
+
+**引擎判定**（`LLMPipeline` / `VLMPipeline`）看目录结构，不看 `config.json`：
+
+| 目录里有 | 引擎 | 说明 |
+| --- | --- | --- |
+| `openvino_model.xml` / `openvino_language_model.xml` | `LLMPipeline` | 纯文本 |
+| 额外有 `openvino_vision_embeddings_model.xml` | `VLMPipeline` | 带视觉塔，图片转 `ov.Tensor`（HWC uint8 RGB）喂入 |
+
+`multimodal: false` 可强制走 llm 引擎（gemma3 关掉视觉塔能省 ~1.4GB 内存）；
+`multimodal: true` 对没有视觉塔的模型无效——照样回落 llm 引擎，避免 VLMPipeline
+构造时因缺视觉塔而失败。
+
+**本轮图片**：末尾 user 消息后追加 `<ov_genai_image_i>` 占位符，历史轮保持纯文本
+（genai 不支持引用历史轮次的图片，与 mlx 只喂当轮图的行为一致）。
+
+#### 实测（Core Ultra 7 155U / 32GB / Qwen2-7B-int4-ov，2026-09）
+
+| device | 加载 | 解码 | 说明 |
+| --- | --- | --- | --- |
+| `GPU`（核显 + CACHE_DIR 命中） | ~5s | **9.5 tok/s** | 推荐；首次编译约 1 分钟 |
+| `CPU` | ~5s | 2.8 tok/s | 可用但偏慢 |
+| `NPU` | ✗ | — | 本版 openvino-genai 报 Unsupported |
+
+> 对话端到端还要加上「记忆事实抽取」的那次 LLM 调用（`memory_process`），
+> 一整轮 40~70s；`/metrics` 的 `ov_generate` 事件拆了 `prompt_tokens` /
+> `gen_tokens` / `ttft_ms` / `gen_tps`，能直接看出是预填充慢还是解码慢。
+> 想再快就换小模型（Qwen2.5-3B/1.5B 的 `-ov` int4 权重），或调小
+> `memory.top_k` 减少注入的笔记条数。
+
+**已有模型**（`D:\ov_uv_llm\`，ModelScope `OpenVINO/<model>-ov` 下载）：
+
+- `qwen2-7b-int4-ov`：纯文本，4.9GB，默认
+- `gemma3-12b-int8-ov`：**多模态**（SigLIP 视觉塔），权重约 13GB，VLM 首次编译 ~2 分钟
+
+导出自己的模型：`optimum-cli export openvino --model <hf-id> --weight-format int4 --ratio 0.8 <输出目录>`。
+
 ## HTTP API（Flutter / Swift / Web 壳子对接）
 
 ```bash

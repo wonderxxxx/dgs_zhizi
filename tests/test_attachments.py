@@ -21,6 +21,9 @@ from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if hasattr(sys.stdout, "reconfigure"):  # Windows 控制台默认 GBK，✅ 会崩
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from core import attachments  # noqa: E402
 from core.users import UserManager  # noqa: E402
 from api import make_handler  # noqa: E402
