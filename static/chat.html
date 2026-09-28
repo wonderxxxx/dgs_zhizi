@@ -76,6 +76,12 @@
     border-left: 2px solid var(--border); padding-left: 8px;
   }
   .msg .time { font-size: 10px; color: var(--muted); margin-top: 4px; opacity: .7; }
+  .msg .regen {
+    margin-top: 6px; background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 8px;
+    font-size: 11px; padding: 3px 10px; cursor: pointer;
+  }
+  .msg .regen:hover { color: var(--accent); border-color: var(--accent); }
   .msg.error .bubble { background: #2a1520; border-color: #5c2438; color: #ff8fa8; }
   .typing { display: inline-flex; gap: 5px; align-items: center; padding: 4px 2px; }
   .typing i {
@@ -118,6 +124,13 @@
     justify-content: center; gap: 4px; color: var(--muted); font-size: 11px;
     background: rgba(15,17,21,.72); cursor: pointer; }
   .att .drop .x { color: var(--err); font-weight: 700; }
+  .att .busy { display: flex; align-items: center; justify-content: center;
+    width: 120px; height: 88px; color: var(--muted); font-size: 11px; }
+  .att .busy-x { position: absolute; top: 2px; right: 5px; cursor: pointer;
+    color: var(--err); font-size: 11px; font-weight: 700; }
+  .att .size { position: absolute; left: 0; bottom: 0; padding: 1px 5px;
+    font-size: 10px; color: var(--muted); background: rgba(6,8,11,.72);
+    border-top-right-radius: 6px; pointer-events: none; }
   #pick {
     background: var(--panel); border: 1px dashed var(--border); color: var(--muted);
     border-radius: 10px; padding: 8px 12px; font-size: 12px; cursor: pointer;
@@ -230,7 +243,7 @@ const attachEl = $('attachments'), pickEl = $('pick');
 let busy = false;
 let vision = false;      // 当前模型是否多模态（/health 报告）
 let histKey = '';        // 已拉取历史的 (user × character) 键：同一对不重复拉
-const pendingImgs = [];  // 已选但未发送的图片 {dataUrl, mime, data}
+const pendingImgs = [];  // 已选但未发送的图片 {dataUrl, mime, data, busy?, job?}
 // 当前会话的消息镜像（服务端历史 + 本轮新发的），供导出图片用
 // 条目：{role, content, actions, ts, images, caption, blobs}
 const chatLog = [];
@@ -287,16 +300,145 @@ function dataUrlToParts(url) {
   return m ? {mime: m[1], data: m[2]} : null;
 }
 
+// ---------- 选图压缩 ----------
+// 服务端有两道闸门：单轮 base64 总量 30M 字符（api.py）、单图 12MB 落盘
+// （core/attachments.py）。原样上传大图会被静默丢掉，前端先压到安全体积。
+const IMG_MAX_DIM = 2048;                 // 长边上限，超过就降采样
+const IMG_KEEP_BYTES = 2 * 1024 * 1024;   // 小于 2MB 且尺寸达标 → 原样发
+const IMG_TARGET_BYTES = 1.5 * 1024 * 1024; // 压缩目标体积
+const IMG_QUALITIES = [0.85, 0.7, 0.55, 0.42];
+
+function rawDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(fr.error || new Error('读取失败'));
+    fr.readAsDataURL(file);
+  });
+}
+
+// dataUrl 一份两用：缩略图直接显示，拆开的 mime/data 发给服务端
+function toParts(dataUrl) {
+  const p = dataUrlToParts(dataUrl);
+  return p ? {dataUrl, mime: p.mime, data: p.data} : null;
+}
+
+async function loadDrawable(file) {
+  // 优先 createImageBitmap（支持 EXIF 方向），失败退回 <img>
+  try {
+    return await createImageBitmap(file, {imageOrientation: 'from-image'});
+  } catch (_) { /* 选项不被支持或格式解不开，继续兜底 */ }
+  try {
+    return await createImageBitmap(file);
+  } catch (_) { /* fallthrough */ }
+  const url = URL.createObjectURL(file);
+  try {
+    return await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error('图片解码失败'));
+      im.src = url;
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function encodeJpeg(src, targetBytes) {
+  const w0 = src.width || src.naturalWidth || 1;
+  const h0 = src.height || src.naturalHeight || 1;
+  let tw = Math.max(1, Math.round(w0 * Math.min(1, IMG_MAX_DIM / Math.max(w0, h0))));
+  let th = Math.max(1, Math.round(h0 * Math.min(1, IMG_MAX_DIM / Math.max(w0, h0))));
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  let fallback = null, fallbackBytes = Infinity;
+  for (let round = 0; round < 3; round++) {
+    canvas.width = tw; canvas.height = th;
+    ctx.fillStyle = '#fff';            // JPEG 没有透明通道：透明区铺白底
+    ctx.fillRect(0, 0, tw, th);
+    ctx.drawImage(src, 0, 0, tw, th);
+    for (const q of IMG_QUALITIES) {
+      const url = canvas.toDataURL('image/jpeg', q);
+      const bytes = Math.round(url.length * 0.75);
+      if (bytes <= targetBytes) return {url, bytes};
+      if (bytes < fallbackBytes) { fallback = url; fallbackBytes = bytes; }
+    }
+    tw = Math.max(1, Math.round(tw / 2));   // 质量档都压不下：再砍一半边长
+    th = Math.max(1, Math.round(th / 2));
+  }
+  return fallback ? {url: fallback, bytes: fallbackBytes} : null;
+}
+
+async function compressImage(file) {
+  const keep = async () => {
+    const parts = toParts(await rawDataUrl(file));
+    return parts ? {...parts, bytes: file.size, compressed: false} : null;
+  };
+  if (!file.type || file.type === 'image/gif') return keep();  // 动图不解码不重编码
+  let src;
+  try {
+    src = await loadDrawable(file);
+  } catch (_) {
+    return keep();   // 解码不了就原样发，别把图弄丢
+  }
+  const w = src.width || src.naturalWidth || 0;
+  const h = src.height || src.naturalHeight || 0;
+  if (w && h && w <= IMG_MAX_DIM && h <= IMG_MAX_DIM && file.size <= IMG_KEEP_BYTES) {
+    if (src.close) src.close();
+    return keep();
+  }
+  const out = encodeJpeg(src, IMG_TARGET_BYTES);
+  if (src.close) src.close();
+  if (!out) return keep();
+  const parts = toParts(out.url);
+  return parts ? {...parts, bytes: out.bytes, compressed: true} : keep();
+}
+
+function humanSize(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + 'MB';
+  if (n >= 1024) return Math.round(n / 1024) + 'KB';
+  return n + 'B';
+}
+
 function renderAttachments() {
   attachEl.innerHTML = '';
   pendingImgs.forEach((img, i) => {
     const div = document.createElement('div');
     div.className = 'att';
-    div.innerHTML = `<img src="${img.dataUrl}">
-      <div class="drop" title="移除"><span class="x">✕</span></div>`;
-    div.querySelector('.drop').addEventListener('click', () => {
+    if (img.busy) {
+      const busyBox = document.createElement('div');
+      busyBox.className = 'busy';
+      busyBox.textContent = '压缩中…';
+      const x = document.createElement('span');
+      x.className = 'busy-x';
+      x.title = '移除';
+      x.textContent = '✕';
+      x.addEventListener('click', () => {
+        pendingImgs.splice(i, 1); renderAttachments();
+      });
+      div.appendChild(busyBox);
+      div.appendChild(x);
+      attachEl.appendChild(div);
+      return;
+    }
+    const im = document.createElement('img');
+    im.src = img.dataUrl;
+    if (img.note) im.title = img.note;
+    const drop = document.createElement('div');
+    drop.className = 'drop';
+    drop.title = '移除';
+    drop.innerHTML = '<span class="x">✕</span>';
+    drop.addEventListener('click', () => {
       pendingImgs.splice(i, 1); renderAttachments();
     });
+    div.appendChild(im);
+    div.appendChild(drop);
+    if (img.note) {
+      const badge = document.createElement('div');
+      badge.className = 'size';
+      badge.textContent = img.badge;
+      div.appendChild(badge);
+    }
     attachEl.appendChild(div);
   });
 }
@@ -304,19 +446,39 @@ function renderAttachments() {
 pickEl.addEventListener('click', () => {
   const input = document.createElement('input');
   input.type = 'file'; input.accept = 'image/*'; input.multiple = true;
-  input.onchange = () => {
-    for (const f of input.files) {
-      const fr = new FileReader();
-      fr.onload = () => {
-        const parts = dataUrlToParts(fr.result);
-        if (parts && pendingImgs.length < 4) pendingImgs.push({dataUrl: fr.result, ...parts});
-        renderAttachments();
-      };
-      fr.readAsDataURL(f);
-    }
+  input.onchange = async () => {
+    const files = [...input.files].slice(0, 4 - pendingImgs.length);
+    const slots = files.map(() => {
+      const s = {busy: true};
+      pendingImgs.push(s);
+      return s;
+    });
+    renderAttachments();
+    const jobs = files.map(async (f, i) => {
+      const slot = slots[i];
+      let res = null;
+      try {
+        res = await compressImage(f);
+      } catch (_) { /* 落到下面的移除分支 */ }
+      const at = pendingImgs.indexOf(slot);
+      if (at < 0) return;              // 压缩期间已被用户移除
+      if (!res || !res.dataUrl) { pendingImgs.splice(at, 1); }
+      else {
+        Object.assign(slot, {dataUrl: res.dataUrl, mime: res.mime,
+                             data: res.data, busy: false});
+        if (res.compressed) {
+          slot.note = `原图 ${humanSize(f.size)}，已压缩至 ${humanSize(res.bytes)}`;
+          slot.badge = `${humanSize(f.size)}→${humanSize(res.bytes)}`;
+        }
+      }
+      renderAttachments();
+    });
+    slots.forEach((s, i) => { s.job = jobs[i]; });   // 发送前可等待
+    await Promise.all(jobs);
   };
   input.click();
 });
+
 
 function appendCaption(el, caption) {
   if (!caption) return;
@@ -337,6 +499,7 @@ function addMsg(role, text, actions, meta, noLog) {
   }
   const el = document.createElement('div');
   el.className = 'msg ' + role;
+  if (noLog) el.classList.add('sys');   // 系统便签（切模型提示）：不算她的回答
   const who = role === 'user'
     ? userName
     : (charName || '智子');
@@ -369,6 +532,7 @@ function addMsg(role, text, actions, meta, noLog) {
   el.appendChild(t);
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  refreshRegen();
   return el;
 }
 
@@ -408,6 +572,7 @@ function setBusy(v) {
   busy = v;
   sendEl.disabled = v;
   inputEl.disabled = v;
+  refreshRegen();   // 忙时不给重试入口，闲下来再挂回最后一条回答上
 }
 
 function authHeaders() {
@@ -484,25 +649,94 @@ function renderHistory(d) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// ---------- 重新生成：换模型后，就同一句话再要一个回答 ----------
+function lastAnswerEl() {
+  // 只认她真正的回答；「已切换到模型…」这类系统便签不算
+  const list = messagesEl.querySelectorAll('.msg.bot:not(.sys)');
+  return list.length ? list[list.length - 1] : null;
+}
+
+function refreshRegen() {
+  messagesEl.querySelectorAll('.regen').forEach(b => b.remove());
+  if (busy) return;
+  const answer = lastAnswerEl();
+  if (!answer) return;
+  // 回答之后只允许跟着「切模型」便签或报错；夹了新一轮提问就不再给重试入口
+  for (let n = answer.nextElementSibling; n; n = n.nextElementSibling) {
+    if (!n.classList.contains('msg')) continue;
+    if (!n.classList.contains('sys') && !n.classList.contains('error')) return;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'regen';
+  btn.textContent = '重新生成';
+  btn.title = '换模型后点这里：丢掉这条回答，就同一句话再问一次';
+  btn.addEventListener('click', regenerate);
+  answer.appendChild(btn);
+}
+
+function swapLastAnswer(data) {
+  const el = lastAnswerEl();
+  if (el) el.remove();
+  for (let i = chatLog.length - 1; i >= 0; i--) {
+    if (chatLog[i].role === 'bot') { chatLog.splice(i, 1); break; }
+  }
+  addMsg('bot', data.reply || '(空回复)', data.actions);
+}
+
+async function regenerate() {
+  if (busy) return;
+  setBusy(true);
+  let typing = null;
+  try {
+    typing = addTyping();
+    const r = await fetch('/regenerate', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({user_id: userName, character: charName || undefined,
+                            hide_actions: $('hideActions').checked}),
+    });
+    const data = await r.json();
+    typing.remove(); typing = null;
+    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    swapLastAnswer(data);
+  } catch (e) {
+    if (typing) typing.remove();
+    addMsg('error', '重新生成失败：' + (e.message || e));  // 旧回答原样留着
+  } finally {
+    setBusy(false);
+    inputEl.focus();
+  }
+}
+
 async function send() {
   const text = inputEl.value.trim();
-  const imgs = pendingImgs.slice();
-  if ((!text && !imgs.length) || busy) return;
-  inputEl.value = '';
-  inputEl.style.height = 'auto';
-  pendingImgs.length = 0; renderAttachments();
-
-  // 模型不支持多模态时：图片仅本地预览，不发给服务端（动态降级）
-  const sendImgs = imgs.map(({mime, data}) => ({mime, data}));
-  const shownImgs = imgs.map(({dataUrl}) => dataUrl);
-  let note = null;
-  if (imgs.length && !vision) {
-    note = '（当前模型不支持多模态，图片仅预览未发送）';
-  }
-  const sent = addMsgWithImages('user', shownImgs, note ? (text ? text + '\n' + note : note) : text);
-  setBusy(true);
-  const typing = addTyping();
+  if ((!text && !pendingImgs.length) || busy) return;
+  setBusy(true);   // 等压缩期间也锁住，连点/回车不会重发
+  let typing = null;
   try {
+    // 等选图压缩跑完再发，避免把半成品（无 dataUrl）贴出去
+    await Promise.all(pendingImgs.map(im => im.job || null).filter(Boolean));
+    const imgs = pendingImgs.filter(im => !im.busy && im.dataUrl);
+    if (!text && !imgs.length) return;   // 图全被移除/压缩失败：留着输入，直接收工
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    // 没压完的留在托盘里，下一轮还能发
+    const unfinished = pendingImgs.filter(im => im.busy || !im.dataUrl);
+    pendingImgs.length = 0;
+    pendingImgs.push(...unfinished);
+    renderAttachments();
+
+    // 模型不支持多模态时：图片仅本地预览，不发给服务端（动态降级）
+    const sendImgs = imgs.map(({mime, data}) => ({mime, data}));
+    const shownImgs = imgs.map(({dataUrl}) => dataUrl);
+    let note = null;
+    if (imgs.length && !vision) {
+      note = '（当前模型不支持多模态，图片仅预览未发送）';
+    }
+    const sent = addMsgWithImages('user', shownImgs,
+      note ? (text ? text + '\n' + note : note) : text);
+    typing = addTyping();
     const headers = authHeaders();
     const payload = {
       message: text,
@@ -517,11 +751,11 @@ async function send() {
       body: JSON.stringify(payload),
     });
     const data = await r.json();
-    typing.remove();
+    typing.remove(); typing = null;
     if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
     // 服务端实际未受理图片时降级提示
     if (imgs.length && vision && data.image_acked === false) {
-      addMsg('error', '服务端未受理图片（模型不支持多模态）');
+      addMsg('error', '服务端未受理图片（可能超过大小限制，或当前模型不支持多模态）');
     }
     // 服务端已把图落盘 + 写了内容说明：立刻补上（刷新后也能看到）
     if (data.attachments && data.attachments.caption) {
@@ -531,7 +765,7 @@ async function send() {
     }
     addMsg('bot', data.reply || '(空回复)', data.actions);
   } catch (e) {
-    typing.remove();
+    if (typing) typing.remove();
     addMsg('error', '出错了：' + (e.message || e));
   } finally {
     setBusy(false);

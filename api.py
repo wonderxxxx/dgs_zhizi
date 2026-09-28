@@ -147,6 +147,7 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                 if mime.startswith("image/") and data:
                     total += len(data)
                     if total > 30_000_000:  # ~22MB 上限
+                        logger.warning("附件总量超限（base64 已 %d 字符），丢弃剩余图片", total)
                         break
                     out.append({"mime": mime, "data": data})
             return out
@@ -365,7 +366,7 @@ def make_handler(users, api_key="", dashboard_enabled=True):
             if path == "/memory/clear":
                 self._memory_clear()
                 return
-            if path != "/chat":
+            if path not in ("/chat", "/regenerate"):
                 self._send(404, {"error": "not found"})
                 return
             if not self._authorized():
@@ -377,19 +378,24 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length).decode("utf-8")
                 body = json.loads(raw) if raw else {}
-                message = str(body.get("message", "")).strip()
-                images = self._parse_attachments(body)
-                if not message and not images:
-                    metrics.inc("chat_bad_requests")
-                    self._send(400, {"error": "message 不能为空"})
-                    return
                 user_id = str(body.get("user_id", "default")).strip() or "default"
                 character = (str(body.get("character", "")).strip() or None)
                 metrics.inc("http_chat_requests")
                 entry = users.entry(user_id, character)
                 persona = entry["persona"]
+                images = []
                 with entry["lock"]:  # 同一键内串行，避免历史/笔记写竞争
-                    result = persona.reply_structured(message, images=images)
+                    if path == "/regenerate":
+                        # 换模型后就同一句话再要一个回答（丢掉旧回复）
+                        result = persona.regenerate_structured()
+                    else:
+                        message = str(body.get("message", "")).strip()
+                        images = self._parse_attachments(body)
+                        if not message and not images:
+                            metrics.inc("chat_bad_requests")
+                            self._send(400, {"error": "message 不能为空"})
+                            return
+                        result = persona.reply_structured(message, images=images)
                 # reply 恒为正文；hide_actions=true 时不返回动作列表（省流量）
                 if body.get("hide_actions", False):
                     result.pop("actions", None)
@@ -403,6 +409,9 @@ def make_handler(users, api_key="", dashboard_enabled=True):
             except json.JSONDecodeError:
                 metrics.inc("chat_bad_requests")
                 self._send(400, {"error": "JSON 解析失败"})
+            except ValueError as exc:   # 没有可重生成的轮次等用户侧问题
+                metrics.inc("chat_bad_requests")
+                self._send(400, {"error": str(exc)})
             except Exception as exc:
                 metrics.inc("http_chat_errors")
                 metrics.emit("http_chat_error", error=str(exc))

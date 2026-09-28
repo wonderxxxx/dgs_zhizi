@@ -192,6 +192,19 @@ class RecentMemory:
         except Exception:
             return "（对话摘要生成失败）"
     
+    def pop_last(self, user_id: str, role: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """弹出最后一条消息（role 给了就要求它匹配），返回它；没有则 None。
+
+        重新生成用：把上一轮的助手回复摘掉，别让它继续留在工作记忆里。
+        """
+        with self._lock:
+            msgs = self._memories.get(user_id) or []
+            if not msgs or (role and msgs[-1].get("role") != role):
+                return None
+            msg = msgs.pop()
+            self._save(user_id)
+            return msg
+
     def clear(self, user_id: str):
         """清空用户的对话历史。"""
         with self._lock:

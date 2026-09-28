@@ -1,5 +1,6 @@
 """人格装配：System Prompt（角色卡）+ 五维记忆 + 会话历史 → 完整消息序列。"""
 
+import base64
 import time
 from collections import deque
 from datetime import datetime
@@ -250,6 +251,136 @@ class Persona:
         if self.last_attachments:
             result["attachments"] = self.last_attachments
         return result
+
+    # ---------- 重新生成（换模型后就同一句话再问一次） ----------
+
+    def _turns(self):
+        """当前生效的短期窗口：有观测笔记 → 落盘工作记忆，否则进程内窗口。"""
+        if self.memory_manager:
+            return self.memory_manager.recent.get_messages("default")
+        return self.history
+
+    def _last_turn(self):
+        """最后一轮 (user_msg, assistant_msg)；不是「先问后答」→ (None, None)。"""
+        msgs = self._turns()
+        if len(msgs) < 2:
+            return None, None
+        asst, user = msgs[-1], msgs[-2]
+        if asst.get("role") != "assistant" or user.get("role") != "user":
+            return None, None
+        return user, asst
+
+    def _drop_last_turn(self):
+        """把最后一轮摘掉：先摘回复，再摘提问（顺序反了会摘错条）。"""
+        if self.memory_manager:
+            store = self.memory_manager.recent
+            store.pop_last("default", "assistant")
+            store.pop_last("default", "user")
+        else:
+            self.history.pop()
+            self.history.pop()
+
+    def _restore_last_turn(self, user_msg, asst_msg):
+        """生成失败时原样放回这一轮（提问 + 旧回复），不能让用户丢了一句话。"""
+        if self.memory_manager:
+            store = self.memory_manager.recent
+            extra = {}
+            if user_msg.get("images"):
+                extra["images"] = user_msg["images"]
+            if user_msg.get("caption"):
+                extra["caption"] = user_msg["caption"]
+            store.add_message("default", "user", user_msg.get("content", ""), **extra)
+            store.add_message("default", "assistant", asst_msg.get("content", ""))
+        else:
+            self.history.append(dict(user_msg))
+            self.history.append(dict(asst_msg))
+
+    def _recall_user_turn(self, user_msg):
+        """提问放回工作记忆：不重复抽事实、不重复进时间索引（上一轮已经做过）。"""
+        if self.memory_manager:
+            extra = {}
+            if user_msg.get("images"):
+                extra["images"] = user_msg["images"]
+            if user_msg.get("caption"):
+                extra["caption"] = user_msg["caption"]
+            self.memory_manager.recent.add_message(
+                "default", "user", user_msg.get("content", ""), **extra)
+        else:
+            self.history.append(dict(user_msg))
+
+    def _remember_assistant(self, reply_text):
+        """新回复入账：与 reply() 同一条路径（工作记忆 + 时间索引）。"""
+        if self.memory_manager:
+            self.memory_manager.process_message(user_id="default", role="assistant",
+                                                content=reply_text)
+        else:
+            self.history.append(self._msg("assistant", reply_text))
+
+    def _load_ref_images(self, refs):
+        """已落盘的图片引用 → base64：重新生成要把上一轮的图再喂给模型。"""
+        out = []
+        for ref in refs or []:
+            if not isinstance(ref, dict):
+                continue
+            got = attachments.read_image(self.note_dir, ref.get("name") or "")
+            if not got:
+                continue
+            data, mime = got
+            out.append({"mime": mime or ref.get("mime") or "image/png",
+                        "data": base64.b64encode(data).decode("ascii")})
+        return out
+
+    def regenerate(self):
+        """丢掉最后一条助手回复，就同一句话重新回答（换模型后重试用）。
+
+        只回滚工作记忆里那一轮；事实/反思/时间索引里旧回复的痕迹保留——
+        跨维度级联删除代价远大于收益，也不影响下一轮上下文。
+        图片沿用上一轮已落盘的引用（读回字节喂模型），不重复写盘、不重复描述。
+        """
+        user_msg, asst_msg = self._last_turn()
+        if user_msg is None:
+            raise ValueError("没有可重新生成的回复（需要先有一问一答）")
+        user_input = str(user_msg.get("content") or "")
+        images = self._load_ref_images(user_msg.get("images"))
+        if not user_input and not images:
+            raise ValueError("没有可重新生成的回复（上一轮没有内容）")
+
+        self._drop_last_turn()
+        t0 = time.perf_counter()
+        metrics.inc("chat_turns")
+        try:
+            self_context = ""
+            if images and self.visual_identity is not None:
+                self_context = self.visual_identity.analyze(images) or ""
+            messages = self.build_messages(user_input, self_context=self_context)
+            reply_text = self.llm.chat(messages, images=images) if images \
+                else self.llm.chat(messages)
+        except Exception:
+            self._restore_last_turn(user_msg, asst_msg)   # 失败就当没重试过
+            raise
+
+        self._recall_user_turn(user_msg)
+        self._remember_assistant(reply_text)
+
+        total_ms = (time.perf_counter() - t0) * 1000.0
+        metrics.observe_ms("chat_turn", total_ms)
+        metrics.emit(
+            "chat_turn",
+            ms=round(total_ms, 1),
+            reply_chars=len(reply_text or ""),
+            history=len(self._turns()),
+            regenerated=True,
+        )
+        return reply_text
+
+    def regenerate_structured(self):
+        """regenerate() 的壳子友好版，字段同 reply_structured。
+
+        不带 attachments：上一轮的图还在原消息上，别让壳子重复渲染。
+        """
+        raw = self.regenerate()
+        content, actions = split_reply(raw)
+        return {"reply": content, "actions": actions, "raw": raw}
 
     def get_memory_stats(self):
         """获取记忆统计信息。"""

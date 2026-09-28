@@ -124,6 +124,16 @@ curl -X POST http://127.0.0.1:8765/chat \
   -d '{"message": "哥哥回来了吗", "user_id": "alice", "hide_actions": true}'
 # → {"reply": "正文", "raw": "原文", "user_id": "alice"}
 
+# 重新生成：换模型后就同一句话再要一个回答（鉴权同 /chat）
+# 丢掉工作记忆里那条旧回复再重问，历史不会多出一条重复提问；
+# 带图轮次的图从落盘读回再喂给模型，引用与说明原样保留。
+# 生成失败则上一轮原样放回，不会让你丢了一句话。
+curl -X POST http://127.0.0.1:8765/regenerate \
+  -d '{"user_id": "alice"}'
+# → {"reply": "正文", "actions": ["动作1"], "raw": "原文", "user_id": "alice"}
+# 没有一问一答时 400。换模型用 POST /model {"model": "<路径>"}，再调本接口。
+# 聊天页里她最后一条回答下方有「重新生成」按钮。
+
 curl http://127.0.0.1:8765/health
 # → {"status": "ok", "model": "...", "users": N, "notes": M}
 
@@ -170,9 +180,9 @@ curl -X POST http://127.0.0.1:8765/memory/clear \
   `memory` 关掉即不主动观测用户（观测笔记是智子的专属能力），`visual_identity` 留空即无
   自视身份卡（白鸥如此）。人物卡支持纯文本/Markdown 或 `SYS_PROMPT = r'''...'''` 包装
   （无需改卡，零修改接入）。
-- **鉴权（可选）**：`config.yaml` 的 `server.api_key` 非空时，`/chat` 需带请求头
-  `Authorization: Bearer <api_key>`（`/health` 放行，方便探活）。`/history`
-  （聊天记录是私事）与 `/memory/clear` 同样要求鉴权。
+- **鉴权（可选）**：`config.yaml` 的 `server.api_key` 非空时，`/chat` 与
+  `/regenerate` 需带请求头 `Authorization: Bearer <api_key>`（`/health` 放行，方便探活）。
+  `/history`（聊天记录是私事）与 `/memory/clear` 同样要求鉴权。
 - **壳子只做 UI**：人格、记忆、红线全在服务端，换壳不动人格。
 - **聊天记录回填**：`GET /history`（`user_id` × `character`）是该会话的「历史真相」——
   壳子打开会话、切换用户或切换角色时调一次，把 `messages` 灌进界面即可续上上下文；
