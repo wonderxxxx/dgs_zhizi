@@ -126,6 +126,48 @@
   .msg .bubble img { max-width: 100%; max-height: 320px; border-radius: 8px;
     display: block; margin-bottom: 6px; }
   .no-vision { color: var(--muted); font-size: 12px; margin: 4px 0; }
+
+  /* ---------- 导出选择弹窗 ---------- */
+  .modal { position: fixed; inset: 0; z-index: 50; padding: 20px;
+    background: rgba(6,8,11,.68); display: none; align-items: center; justify-content: center; }
+  .modal.open { display: flex; }
+  .modal-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    width: 100%; max-width: 620px; max-height: 86vh; display: flex; flex-direction: column;
+    box-shadow: 0 18px 50px rgba(0,0,0,.55); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .modal-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .modal-head .count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .pick-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); }
+  .pick-bar button { padding: 4px 10px; font-size: 12px; }
+  .pick-bar input[type="search"] { flex: 1; min-width: 130px; background: var(--bg);
+    border: 1px solid var(--border); color: var(--text); border-radius: 8px;
+    padding: 5px 10px; font: inherit; font-size: 12px; outline: none; }
+  .pick-bar input[type="search"]:focus { border-color: var(--accent); }
+  .pick-list { overflow-y: auto; padding: 6px; flex: 1; min-height: 120px; }
+  .pick-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px;
+    border-radius: 8px; cursor: pointer; }
+  .pick-row:hover { background: #1e232d; }
+  .pick-row.on { background: #1b2333; }
+  .pick-row input { margin-top: 3px; flex: none; accent-color: var(--accent); }
+  .pick-row .txt { min-width: 0; flex: 1; }
+  .pick-row .meta { color: var(--muted); font-size: 11px; display: flex; gap: 6px;
+    align-items: center; flex-wrap: wrap; }
+  .pick-row .tag { border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; font-size: 10px; }
+  .pick-row .tag.u { color: var(--accent); border-color: #2c3d5c; }
+  .pick-row .tag.b { color: var(--ok); border-color: #1d5c3f; }
+  .pick-row .body { font-size: 12px; color: var(--text); margin-top: 2px; white-space: pre-wrap;
+    word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden; }
+  .modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 12px 16px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .modal-foot .est { color: var(--muted); font-size: 11px; }
+  .modal-foot .est.bad { color: var(--err); }
+  .modal-foot .btns { display: flex; gap: 8px; }
+  #expGo { background: var(--accent); border-color: var(--accent); color: #0f1115; font-weight: 600; }
+  #expGo:disabled { opacity: .5; cursor: not-allowed; }
+  #expGo:hover:not(:disabled) { color: #0f1115; filter: brightness(1.1); }
 </style>
 </head>
 <body>
@@ -139,6 +181,7 @@
     <select id="modelSelect" title="切换模型（mlx 场景释放旧引擎、惰性重载）"></select>
     <span class="vision-pill" id="visionPill">…</span>
     <span class="pill" id="histPill" title="已从服务端拉取的聊天记录条数">…</span>
+    <button id="export" title="挑选要导出的消息，合成一张 PNG 长图">导出图片</button>
     <button id="clear" title="仅清空本页显示（服务端记忆不受影响）">清屏</button>
   </div>
 </header>
@@ -157,6 +200,29 @@
   <div class="hint">人格与记忆在服务端 · 笔记落盘 notes/&lt;user_id&gt;/&lt;角色&gt;/ · 一级用户 × 二级角色，互相隔离</div>
 </footer>
 
+<div class="modal" id="expModal">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="选择要导出的消息">
+    <div class="modal-head">
+      <h2>选择要导出的内容</h2>
+      <span class="count" id="expCount">已选 0 / 0</span>
+    </div>
+    <div class="pick-bar">
+      <button id="expAll" title="全选（带搜索时只作用于当前列出的）">全选</button>
+      <button id="expNone" title="全不选">全不选</button>
+      <button id="expInv" title="反选">反选</button>
+      <input type="search" id="expSearch" placeholder="搜索内容…"/>
+    </div>
+    <div class="pick-list" id="expList"></div>
+    <div class="modal-foot">
+      <span class="est" id="expEst"></span>
+      <div class="btns">
+        <button id="expCancel">取消</button>
+        <button id="expGo">导出长图</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const messagesEl = $('messages'), inputEl = $('input'), sendEl = $('send');
@@ -165,6 +231,9 @@ let busy = false;
 let vision = false;      // 当前模型是否多模态（/health 报告）
 let histKey = '';        // 已拉取历史的 (user × character) 键：同一对不重复拉
 const pendingImgs = [];  // 已选但未发送的图片 {dataUrl, mime, data}
+// 当前会话的消息镜像（服务端历史 + 本轮新发的），供导出图片用
+// 条目：{role, content, actions, ts, images, caption, blobs}
+const chatLog = [];
 
 const NEW_USER = '＋ 新用户…';
 let userName = (localStorage.getItem('zhizi_user_id') || '').trim() || 'default';
@@ -257,10 +326,15 @@ function appendCaption(el, caption) {
   el.appendChild(c);
 }
 
-function addMsg(role, text, actions, meta) {
+function addMsg(role, text, actions, meta, noLog) {
   // meta: {ts, images:[{name,mime}], caption}——历史回填用（服务端给的原图 + 内容说明）
   meta = meta || {};
   $('empty')?.remove();
+  // 错误提示与界面提示不进导出；noLog 用于「已切换到模型」这类非聊天内容
+  if (!noLog && role !== 'error') {
+    chatLog.push({role, content: text, actions: actions || [], ts: meta.ts || '',
+                  images: meta.images || [], caption: meta.caption || ''});
+  }
   const el = document.createElement('div');
   el.className = 'msg ' + role;
   const who = role === 'user'
@@ -306,6 +380,9 @@ function addMsgWithImages(role, imgs, text, actions) {
     img.src = url;
     bubble.prepend(img);
   });
+  // 刚发的图还在内存里（服务端落盘前），记下 dataUrl 供导出
+  const rec = chatLog[chatLog.length - 1];
+  if (rec && imgs.length) rec.blobs = imgs.slice();
   return el;
 }
 
@@ -391,6 +468,7 @@ function renderHistory(d) {
   const msgs = Array.isArray(d.messages) ? d.messages : [];
   releaseImages();
   messagesEl.innerHTML = '';
+  chatLog.length = 0;   // 与 DOM 一起重置：换用户/换角色/重拉时别把旧记录留在导出里
   $('histPill').textContent = msgs.length ? `历史 ${msgs.length}` : '无历史';
   if (!msgs.length) {
     messagesEl.innerHTML = `<div class="empty" id="empty">${
@@ -448,6 +526,8 @@ async function send() {
     // 服务端已把图落盘 + 写了内容说明：立刻补上（刷新后也能看到）
     if (data.attachments && data.attachments.caption) {
       appendCaption(sent, data.attachments.caption);
+      const rec = chatLog[chatLog.length - 1];
+      if (rec) rec.caption = data.attachments.caption;
     }
     addMsg('bot', data.reply || '(空回复)', data.actions);
   } catch (e) {
@@ -473,6 +553,491 @@ $('clear').addEventListener('click', () => {
   messagesEl.innerHTML = '<div class="empty" id="empty">已清屏（服务端记忆保留）。</div>';
   $('histPill').textContent = '已清屏';
 });
+
+// ---------- 导出聊天记录为 PNG（Canvas 手绘，零新依赖） ----------
+// 页面本身不能直接转图（没有 html2canvas，也不引 CDN），所以照着上面的 CSS
+// 把每条消息重新画一遍：布局先算一遍量高度，再画——避免画到一半才发现画布不够高。
+const EXP_W = 900;        // 导出宽度（与页面 860px 内容区对齐）
+const EXP_PAD = 20;
+const EXP_HEAD = 84;      // 顶部标题栏高度
+const EXP_MAXDIM = 40000; // 画布单边上限（探测后会被 canvasBudget() 收紧）
+// iOS Safari 的画布面积上限只有 16777216 px，超了 toBlob 直接返回 null；
+// 桌面 Chrome 大得多。先探测一次真实上限，探不到就用 iOS 安全值。
+const EXP_MIN_SCALE = 0.5; // 再小字就糊了，低于此值判为放不下
+const expUrls = [];       // 导出期间临时 blob URL，画完统一回收
+
+function fontOf(size, weight, italic) {
+  return (italic ? 'italic ' : '') + (weight || 400) + ' ' + size +
+         'px -apple-system, "SF Pro Text", "PingFang SC", sans-serif';
+}
+function cssVar(n) {
+  return getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+}
+function dateShort(iso) {
+  // 服务端时间戳是无时区的 ISO，按本地时间解析；缺失/坏格式都退回当前时间（与页面一致）
+  const d = new Date(iso || '');
+  const use = isNaN(d.getTime()) ? new Date() : d;
+  return (use.getMonth() + 1) + '-' + String(use.getDate()).padStart(2, '0') + ' ' +
+         use.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+function fileStamp() {
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes());
+}
+function safeName(s) {
+  return (s || 'chat').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40);
+}
+
+// 折行：中日韩字符与 emoji 可任意处断行，拉丁文按词断行（canvas 无 word-wrap）
+const CJK = /[\u1100-\u11FF\u2E80-\u303F\u3040-\u30FF\u3130-\u318F\u3400-\u4DBF\u4E00-\u9FFF\uA960-\uA97F\uAC00-\uD7FF\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\u{1F000}-\u{1FAFF}]/u;
+function tokenize(s) {
+  const toks = [];
+  let buf = '';
+  for (const ch of s) {
+    if (ch === '\n') { if (buf) { toks.push(buf); buf = ''; } toks.push('\n'); }
+    else if (CJK.test(ch)) { if (buf) { toks.push(buf); buf = ''; } toks.push(ch); }
+    else if (ch === ' ') { if (buf) { buf += ch; } else { buf = ch; } toks.push(buf); buf = ''; }
+    else buf += ch;
+  }
+  if (buf) toks.push(buf);
+  return toks;
+}
+function wrapText(ctx, text, maxW) {
+  const lines = [];
+  let cur = '';
+  const trim = (s) => s.replace(/ +$/, '');
+  for (const t of tokenize(text)) {
+    if (t === '\n') { lines.push(trim(cur)); cur = ''; continue; }  // 保留空行（对应 pre-wrap）
+    if (ctx.measureText(cur + t).width <= maxW) { cur += t; continue; }
+    if (t === ' ') { if (cur) lines.push(trim(cur)); cur = ''; continue; }  // 行尾空格丢掉
+    if (cur) { lines.push(trim(cur)); cur = ''; }
+    if (ctx.measureText(t).width <= maxW) { cur = t; continue; }
+    let piece = '';  // 超长单词：逐字符硬切
+    for (const ch of t) {
+      if (piece && ctx.measureText(piece + ch).width > maxW) { lines.push(trim(piece)); piece = ch; }
+      else piece += ch;
+    }
+    cur = piece;
+  }
+  if (cur) lines.push(trim(cur));
+  return lines;
+}
+const widest = (ctx, ls) => ls.reduce((a, l) => Math.max(a, ctx.measureText(l).width), 0);
+// 圆角矩形；tail 指哪个角收成 4px（与 .bubble 的单角收齐一致）
+function roundRectPath(ctx, x, y, w, h, r, tail) {
+  const [tl, tr, br, bl] = tail === 'br' ? [r, r, 4, r] : [r, r, r, 4];
+  ctx.beginPath();
+  ctx.moveTo(x + tl, y);
+  ctx.lineTo(x + w - tr, y); ctx.arcTo(x + w, y, x + w, y + tr, tr);
+  ctx.lineTo(x + w, y + h - br); ctx.arcTo(x + w, y + h, x + w - br, y + h, br);
+  ctx.lineTo(x + bl, y + h); ctx.arcTo(x, y + h, x, y + h - bl, bl);
+  ctx.lineTo(x, y + tl); ctx.arcTo(x, y, x + tl, y, tl);
+  ctx.closePath();
+}
+
+// 量一条消息的排版，返回 {h, paint(ctx, y0)}
+function layoutMsg(ctx, m, imgs, T, hideActions) {
+  const isUser = m.role === 'user';
+  const colW = EXP_W - EXP_PAD * 2;
+  const maxW = colW * 0.78;          // 同 .msg { max-width: 78% }（只是上限）
+  const padX = 14, padY = 10;
+  const innerW = maxW - padX * 2;
+  const ops = [];
+  let y = 0;
+  const side = isUser ? 'right' : 'left';
+  // 内容列靠哪一侧对齐：user 贴右缘（align-self: flex-end），bot 贴左缘
+  const anchor = isUser ? EXP_PAD + colW : EXP_PAD;
+  // 宽 w 的块挂在这一侧时的左上角 x（user 从右往左挂，bot 从左往右排）
+  const hang = (w) => isUser ? anchor - w : anchor;
+
+  // 名字
+  const who = isUser ? userName : (charName || '智子');
+  ops.push({k: 'text', t: who, x: anchor, y, font: fontOf(11), color: T.muted, align: side});
+  y += 15;
+
+  // 原图缩放（页面上限 320px，导出用 200px 免得一张图占满整页）
+  const imFit = [];
+  let imgH = 0, imgW = 0;
+  imgs.forEach((im) => {
+    if (!im || !im.width || !im.height) return;
+    const r = Math.min(1, innerW / im.width, 200 / im.height);
+    const w = Math.max(1, Math.round(im.width * r)), h = Math.max(1, Math.round(im.height * r));
+    imFit.push({im, w, h, y: y + padY + imgH});
+    imgH += h + 6;
+    imgW = Math.max(imgW, w);
+  });
+  if (imFit.length) imgH -= 6;
+
+  // 正文
+  const body = (m.content || '').replace(/\s+$/, '');
+  ctx.font = fontOf(14);
+  const lines = body ? wrapText(ctx, body, innerW) : [];
+  const textW = widest(ctx, lines);
+  const textH = lines.length * 22;
+  const textTop = y + padY + imgH + (imFit.length && lines.length ? 6 : 0);
+  const bubW = Math.min(colW, Math.max(imgW, textW) + padX * 2);
+  const bubH = padY * 2 + imgH + (imFit.length && lines.length ? 6 : 0) + textH;
+  const bubX = hang(bubW);
+
+  ops.push({k: 'bubble', x: bubX, y, w: bubW, h: bubH, tail: isUser ? 'br' : 'bl',
+            fill: isUser ? T.userBubble : T.botBubble, stroke: isUser ? '#2c3d5c' : T.border});
+  imFit.forEach((f) => ops.push({k: 'img', x: bubX + padX, y: f.y, w: f.w, h: f.h, im: f.im}));
+  lines.forEach((l, i) => ops.push({k: 'text', t: l, x: bubX + padX, y: textTop + i * 22,
+                                    font: fontOf(14), color: T.text, align: 'left'}));
+  y += bubH;
+
+  // 动作（斜体，可被「隐藏动作」勾掉）
+  if (!hideActions && m.actions && m.actions.length) {
+    const t = m.actions.join('\n');
+    ctx.font = fontOf(12, null, true);
+    const ls = wrapText(ctx, t, maxW);
+    const w = widest(ctx, ls);
+    const x = hang(w);
+    y += 6;
+    ls.forEach((l, i) => ops.push({k: 'text', t: l, x, y: y + i * 18,
+                                   font: fontOf(12, null, true), color: T.muted, align: 'left'}));
+    y += ls.length * 18;
+  }
+
+  // 图片内容说明（左竖线 + 缩进，同 .caption）
+  if (m.caption) {
+    ctx.font = fontOf(11);
+    const ls = wrapText(ctx, '图片内容：' + m.caption, maxW - 10);
+    const w = widest(ctx, ls);
+    const x = hang(w);
+    y += 6;
+    const h = ls.length * 17;
+    ops.push({k: 'vline', x, y, h});
+    ls.forEach((l, i) => ops.push({k: 'text', t: l, x: x + 10, y: y + i * 17,
+                                   font: fontOf(11), color: T.muted, align: 'left'}));
+    y += h;
+  }
+
+  // 时间
+  y += 4;
+  ops.push({k: 'text', t: dateShort(m.ts), x: anchor, y,
+            font: fontOf(10), color: T.muted, align: side});
+  y += 15;
+
+  return {
+    h: y,
+    paint(ctx, y0) {
+      for (const op of ops) {
+        const yy = y0 + op.y;
+        if (op.k === 'bubble') {
+          ctx.fillStyle = op.fill;
+          ctx.strokeStyle = op.stroke;
+          ctx.lineWidth = 1;
+          roundRectPath(ctx, op.x + .5, yy + .5, op.w - 1, op.h - 1, 14, op.tail);
+          ctx.fill();
+          ctx.stroke();
+        } else if (op.k === 'img') {
+          ctx.save();
+          roundRectPath(ctx, op.x, yy, op.w, op.h, 8, 'all');
+          ctx.clip();
+          ctx.drawImage(op.im, op.x, yy, op.w, op.h);
+          ctx.restore();
+        } else if (op.k === 'vline') {
+          ctx.fillStyle = T.border;
+          ctx.fillRect(op.x, yy, 2, op.h);
+        } else {
+          ctx.font = op.font;
+          ctx.fillStyle = op.color;
+          ctx.textAlign = op.align;
+          ctx.fillText(op.t, op.x, yy);
+        }
+      }
+      ctx.textAlign = 'left';
+    },
+  };
+}
+
+function expTheme() {
+  return {bg: cssVar('--bg'), panel: cssVar('--panel'), border: cssVar('--border'),
+          text: cssVar('--text'), muted: cssVar('--muted'),
+          userBubble: cssVar('--user-bubble'), botBubble: cssVar('--bot-bubble')};
+}
+// 量高度用的度量上下文，全局复用一个（measureText 与画布尺寸无关）
+let expMeasure = null;
+function measureCtx() {
+  if (!expMeasure) {
+    const c = document.createElement('canvas');
+    c.width = EXP_W;
+    c.height = 1;
+    expMeasure = c.getContext('2d');
+    expMeasure.textBaseline = 'top';
+  }
+  return expMeasure;
+}
+// 探测浏览器真实画布上限：iOS Safari 只有 16.7M px，桌面 Chrome 大一个量级。
+// 画布申请失败时尺寸会被退回 0 或读回空白，所以写个已知色再读最后 1px 验证。
+let expBudget = null;
+function canAlloc(w, h) {
+  try {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const x = c.getContext('2d');
+    x.fillStyle = '#010203';
+    x.fillRect(w - 1, h - 1, 1, 1);
+    const d = x.getImageData(w - 1, h - 1, 1, 1).data;
+    return d[0] === 1 && d[1] === 2 && d[2] === 3;
+  } catch (_) { return false; }
+}
+function canvasBudget() {
+  if (expBudget) return expBudget;
+  const w = EXP_W * 2;   // 按 2x 宽度探测，和实际导出同宽
+  for (const c of [[40e6, 40000], [12e6, 16000], [4e6, 4096]]) {
+    if (canAlloc(w, Math.floor(c[0] / w))) { expBudget = {px: c[0], dim: c[1]}; return expBudget; }
+  }
+  expBudget = {px: 4e6, dim: 4096};
+  return expBudget;
+}
+// 整段内容进一张画布时的缩放：优先 2x，装不下就按比例降，最低 EXP_MIN_SCALE。
+// 取整最多让两边各进 1px，先留 0.1% 余量，再用定步长兜底（按比例回缩可能
+// 因为取整而毫无进展，死循环）。
+function planExport(H, msgCount) {
+  const b = canvasBudget();
+  const lim = Math.min(b.dim / H, Math.sqrt(b.px * 0.999 / (EXP_W * H)));
+  let scale = Math.min(2, lim);
+  for (let i = 0; i < 24 && Math.round(EXP_W * scale) * Math.round(H * scale) > b.px; i++) {
+    scale = Math.max(EXP_MIN_SCALE, scale - 0.02);
+  }
+  const w = Math.round(EXP_W * scale), h = Math.round(H * scale);
+  // 放不下时给个「最多几条」的提示：按当前平均消息高反推
+  const cap = Math.max(0, Math.floor(b.px / (EXP_W * EXP_MIN_SCALE) - EXP_HEAD - EXP_PAD) /
+                      ((H - EXP_HEAD - EXP_PAD) / Math.max(1, msgCount || 1)));
+  return {w, h, scale, fits: lim >= EXP_MIN_SCALE && w * h <= b.px, maxMsgs: Math.floor(cap)};
+}
+
+// ---------- 导出选择弹窗 ----------
+let expList = [];         // 可导出消息的快照（chatLog 的子集）
+let expSel = new Set();   // 勾选的下标
+function exportables() {
+  return chatLog.filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'bot');
+}
+function previewOf(m) {
+  const t = ((m.content || '') + ' ' + (m.actions || '')).replace(/\s+/g, ' ').trim();
+  if (t) return t;
+  return ((m.blobs || []).length + (m.images || []).length) ? '［图片］' : '（空）';
+}
+function renderExpList() {
+  const q = $('expSearch').value.trim().toLowerCase();
+  const box = $('expList');
+  box.innerHTML = '';
+  let shown = 0;
+  expList.forEach((m, i) => {
+    if (q && previewOf(m).toLowerCase().indexOf(q) < 0) return;
+    shown++;
+    const isUser = m.role === 'user';
+    const nImg = (m.blobs || []).length + (m.images || []).length;
+    const row = document.createElement('label');
+    row.className = 'pick-row' + (expSel.has(i) ? ' on' : '');
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    const tag = document.createElement('span');
+    tag.className = 'tag ' + (isUser ? 'u' : 'b');
+    tag.textContent = isUser ? userName : (charName || '智子');
+    const when = document.createElement('span');
+    when.textContent = dateShort(m.ts);
+    meta.append(tag, when);
+    if (nImg) {
+      const g = document.createElement('span');
+      g.textContent = '🖼 ' + nImg;
+      meta.appendChild(g);
+    }
+    const body = document.createElement('span');
+    body.className = 'body';
+    body.textContent = previewOf(m);
+    const txt = document.createElement('span');
+    txt.className = 'txt';
+    txt.append(meta, body);
+    const box2 = document.createElement('input');
+    box2.type = 'checkbox';
+    box2.checked = expSel.has(i);
+    box2.addEventListener('change', () => {
+      if (box2.checked) expSel.add(i); else expSel.delete(i);
+      row.classList.toggle('on', box2.checked);
+      syncExpFoot();
+    });
+    row.append(box2, txt);
+    box.appendChild(row);
+  });
+  if (!shown) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.style.marginTop = '18px';
+    e.textContent = q ? '没有匹配的消息。' : '没有可导出的聊天记录。';
+    box.appendChild(e);
+  }
+}
+function syncExpFoot() {
+  $('expCount').textContent = `已选 ${expSel.size} / ${expList.length}`;
+  $('expGo').disabled = !expSel.size;
+  const est = $('expEst');
+  if (!expSel.size) { est.textContent = ''; est.classList.remove('bad'); return; }
+  const picked = expList.filter((_, i) => expSel.has(i));
+  const ctx = measureCtx();
+  const hideActions = $('hideActions').checked;
+  const T = expTheme();
+  // 预估高度：图片按 200px 高的占位算（真图还没载下来）
+  const place = new Map();
+  picked.forEach((m, i) => {
+    const n = (m.blobs || []).length + (m.images || []).length;
+    if (n) place.set(i, Array.from({length: n}, () => ({width: 320, height: 200})));
+  });
+  const H = EXP_HEAD + picked.reduce((a, m, i) =>
+    a + layoutMsg(ctx, m, place.get(i) || [], T, hideActions).h, 0) + EXP_PAD;
+  const p = planExport(H, picked.length);
+  est.classList.toggle('bad', !p.fits);
+  // 缩放比是浮点，展示时压到 2 位，免得出现 1.2267357882376984 这种
+  const sx = Math.round(p.scale * 100) / 100;
+  est.textContent = p.fits
+    ? `预计 ${p.w} × ${p.h} px（${sx}×）· 单张长图`
+    : `太长，单张长图放不下（约 ${p.maxMsgs} 条以内），请减少勾选`;
+}
+function openExportDialog() {
+  expList = exportables();
+  expSel = new Set(expList.map((_, i) => i));
+  $('expSearch').value = '';
+  renderExpList();
+  syncExpFoot();
+  $('expModal').classList.add('open');
+}
+function closeExportDialog() { $('expModal').classList.remove('open'); }
+// 当前搜索条件下可见的下标（带搜索时全选/全不选/反选只作用于这些）
+function visibleIdx() {
+  const q = $('expSearch').value.trim().toLowerCase();
+  const out = new Set();
+  expList.forEach((m, i) => { if (!q || previewOf(m).toLowerCase().indexOf(q) >= 0) out.add(i); });
+  return out;
+}
+function repaint() { renderExpList(); syncExpFoot(); }
+$('export').addEventListener('click', openExportDialog);
+$('expCancel').addEventListener('click', closeExportDialog);
+$('expModal').addEventListener('click', (e) => { if (e.target === $('expModal')) closeExportDialog(); });
+$('expGo').addEventListener('click', exportSelected);
+$('expSearch').addEventListener('input', repaint);
+$('expAll').addEventListener('click', () => { visibleIdx().forEach((i) => expSel.add(i)); repaint(); });
+$('expNone').addEventListener('click', () => { visibleIdx().forEach((i) => expSel.delete(i)); repaint(); });
+$('expInv').addEventListener('click', () => {
+  visibleIdx().forEach((i) => expSel.has(i) ? expSel.delete(i) : expSel.add(i));
+  repaint();
+});
+document.addEventListener('keydown', (e) => {
+  if (!$('expModal').classList.contains('open')) return;
+  if (e.key === 'Escape') closeExportDialog();
+  else if (e.key === 'Enter' && !e.target.closest('input, textarea')) {
+    if (!$('expGo').disabled) exportSelected();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (!$('expModal').classList.contains('open')) return;
+  if (e.key === 'Escape') closeExportDialog();
+  else if (e.key === 'Enter' && !e.target.closest('input, textarea')) {
+    if (!$('expGo').disabled) exportSelected();
+  }
+});
+
+
+async function collectExportImages(list) {
+  const jobs = [];
+  list.forEach((m, i) => {
+    (m.blobs || []).forEach((src) => jobs.push({i, src}));
+    (m.images || []).forEach((ref) => jobs.push({i, ref}));
+  });
+  const map = new Map();
+  await Promise.all(jobs.map(async (j) => {
+    let url = j.src;
+    if (!url) {
+      try {
+        const q = new URLSearchParams({user_id: userName, name: j.ref.name});
+        if (charName) q.set('character', charName);
+        const r = await fetch('/image?' + q.toString(), {headers: authHeaders()});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        url = URL.createObjectURL(await r.blob());
+        expUrls.push(url);
+      } catch (_) { return; }
+    }
+    const im = await new Promise((res) => {
+      const el = new Image();
+      el.onload = () => res(el);
+      el.onerror = () => res(null);
+      el.src = url;
+    });
+    if (!im) return;
+    if (!map.has(j.i)) map.set(j.i, []);
+    map.get(j.i).push(im);
+  }));
+  return map;
+}
+
+async function exportSelected() {
+  const btn = $('export');
+  const picked = expList.filter((_, i) => expSel.has(i));
+  if (!picked.length) { addNote('没有勾选任何内容。'); return; }
+  const T = expTheme();
+  const hideActions = $('hideActions').checked;
+  btn.disabled = true;
+  btn.textContent = '导出中…';
+  $('expGo').disabled = true;
+  $('expModal').classList.remove('open');
+  try {
+    const imgs = await collectExportImages(picked);
+
+    // 先排版量高（同一套度量上下文，宽度固定）
+    const ctx = measureCtx();
+    const layouts = picked.map((m, i) => layoutMsg(ctx, m, imgs.get(i) || [], T, hideActions));
+    const H = EXP_HEAD + layouts.reduce((a, L) => a + L.h, 0) + EXP_PAD;
+
+    // 单张长图：整段内容进一张画布，清晰度尽量高，实在装不下才降
+    const plan = planExport(H);
+    if (!plan.fits) {
+      throw new Error(`内容太长，单张长图放不下（约 ${plan.maxMsgs} 条以内），请减少勾选`);
+    }
+    const cv = document.createElement('canvas');
+    cv.width = plan.w;
+    cv.height = plan.h;
+    const c = cv.getContext('2d');
+    c.setTransform(plan.scale, 0, 0, plan.scale, 0, 0);
+    c.textBaseline = 'top';
+    c.fillStyle = T.bg;
+    c.fillRect(0, 0, EXP_W, H);
+
+    // 顶部标题栏
+    c.textAlign = 'left';
+    c.font = fontOf(16, 600);
+    c.fillStyle = T.text;
+    c.fillText((charName || '智子') + ' · 聊天记录', EXP_PAD, EXP_PAD + 4);
+    c.font = fontOf(12);
+    c.fillStyle = T.muted;
+    c.fillText(`用户 ${userName} · ${dateShort(picked[0].ts)} → ${dateShort(picked[picked.length - 1].ts)}` +
+               ` · 共 ${picked.length} 条`, EXP_PAD, EXP_PAD + 30);
+    c.fillStyle = T.border;
+    c.fillRect(EXP_PAD, EXP_HEAD - 22, EXP_W - EXP_PAD * 2, 1);
+
+    let y = EXP_HEAD;
+    layouts.forEach((L) => { L.paint(c, y); y += L.h; });
+
+    const base = safeName((charName || 'zhizi') + '-' + userName + '-' + fileStamp());
+    const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+    if (!blob) throw new Error('浏览器没能生成图片，请减少勾选的消息');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = base + '.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    addNote(`已导出 1 张长图（${base}.png，${plan.w} × ${plan.h}）。`);
+  } catch (e) {
+    addMsg('error', '导出失败：' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '导出图片';
+    $('expGo').disabled = false;
+    while (expUrls.length) URL.revokeObjectURL(expUrls.pop());
+  }
+}
 
 async function loadModels() {
   try {
@@ -522,7 +1087,7 @@ $('modelSelect').addEventListener('change', async (e) => {
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    addMsg('bot', `（已切换到模型 ${d.model.split('/').pop()}${d.vision ? ' · 多模态' : ' · 仅文本'}，重新加载中…）`);
+    addMsg('bot', `（已切换到模型 ${d.model.split('/').pop()}${d.vision ? ' · 多模态' : ' · 仅文本'}，重新加载中…）`, null, null, true);
     sel.dataset.current = d.model || '';
     health();
   } catch (err) {
