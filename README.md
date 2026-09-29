@@ -11,9 +11,16 @@ zhizi/
 ├── prompts/
 │   └── zhizi_v1.md        # 自研版 System Prompt（人格层唯一事实来源）
 ├── core/
-│   ├── llm.py             # 统一调用层（API/local 走 OpenAI 协议；mlx 进程内推理）
+│   ├── llm.py             # 统一调用层（API/local 走 OpenAI 协议；mlx / openvino 进程内推理）
 │   ├── metrics.py         # 运行指标 + 结构化日志（/metrics、SSE 事件源）
-│   ├── memory.py          # 观测笔记 v2：SQLite 持久化 + BM25 倒排检索 + 重要度 + 去重
+│   ├── memory/            # 五维记忆：工作 / 近期 / 事实 / 反思 / 人格 + 统一调度
+│   │   ├── manager.py     # MemoryManager：每轮更新五维 + 召回 trace（/memory/api 数据源）
+│   │   ├── recent.py      # 工作记忆：会话历史 + 图片引用 / caption（跨设备回填靠它）
+│   │   ├── timeindex.py   # 近期记忆：SQLite 时间索引 + BM25 打分 + 重要度
+│   │   ├── facts.py       # 事实记忆：LLM 从对话抽原句，SHA-256 去重
+│   │   ├── reflection.py  # 反思记忆：由事实合成高层洞察
+│   │   └── persona.py     # 人格记忆：角色人格一致性分析（每 10 条消息更新）
+│   ├── attachments.py     # 图片落盘 + caption（VLM 说明，随该轮进记忆）
 │   ├── persona.py         # 人格装配：System Prompt + 记忆 + 历史 + 结构化回复
 │   ├── characters.py      # 角色注册表：prompt 读取（含字面量包装）+ 能力开关
 │   ├── visual_identity.py # 自视身份层：VLM 裸描述 → 属性匹配 → 「图片中可能是我」
@@ -24,9 +31,12 @@ zhizi/
 │   ├── identity.json      # 角色视觉特征（发色/瞳色/画风/年龄段/参考图清单）
 │   └── references/        # 参考图（可选：放对应图片后开启「视觉比对」加权）
 ├── static/
+│   ├── chat.html          # 聊天页（GET /chat）
+│   ├── memory.html        # 记忆观察页（GET /memory）
 │   └── dashboard.html     # 实时监控单页（GET /dashboard）
+├── tests/                 # 验证脚本（纯 python 跑，见各文件头「运行方式」）
 ├── logs/                  # 结构化日志（observability.log_file，自动生成）
-├── notes/                 # 观测笔记持久化（自动生成）
+├── notes/                 # 记忆持久化（自动生成：memory/ 五维库 + 图片）
 ├── api.py                 # HTTP JSON API（Flutter/Swift/Web 壳子对接）
 ├── main.py                # 命令行对话入口（--no-actions 可隐藏动作描写）
 └── requirements.txt
@@ -250,12 +260,18 @@ curl -X POST http://127.0.0.1:8765/memory/clear \
 ## 设计要点
 
 - **模型无关**：云端 API 与本地模型都走 OpenAI 兼容协议，切换只改 `config.yaml`。
-- **可观测**：`core/metrics.py` 采集聊天轮次、LLM 延迟、mlx tok/s 与峰值内存、记忆耗时/错误；日志到 stderr + `logs/zhizi.log`；`GET /metrics`、`GET /events`（SSE）、`GET /dashboard` 实时页（`observability` 段配置）。
-- **观测笔记 = 长期记忆（v2）**：每轮对话后由智子自己用科研口吻写一条笔记
-  （角色化存储），自评「重要度 1-10」，相同内容自动去重（只更新不新增）；
-  下次聊到相关内容时按 BM25 打分注入——她真的"记得"，且越重要的记得越牢。
-  存储为 SQLite（`notes/<user_id>/notes.db`），旧 JSONL 首次启动自动迁移（原文件
-  保留为 `notes.jsonl.migrated`）。
+- **可观测**：`core/metrics.py` 采集聊天轮次、LLM 延迟、mlx tok/s 与峰值内存、
+  openvino tok/s 与预填充耗时（`ttft_ms`）、记忆耗时/错误；日志到 stderr +
+  `logs/zhizi.log`；`GET /metrics`、`GET /events`（SSE）、`GET /dashboard` 实时页
+  （`observability` 段配置）。
+- **五维记忆（`core/memory/`，借鉴 N.E.K.O 的简化版）**：每轮对话按维度分流——
+  **工作记忆**存会话历史与图片引用/caption（跨设备回填的真相源）；**近期记忆**把每条
+  消息落进 SQLite 时间索引并按 BM25 打分（user 重要度 5 / assistant 3）；用户消息触发
+  LLM 抽取**事实**（原句存储、SHA-256 去重，相同内容只更新不新增）；有事实时合成
+  **反思**；每 10 条消息更新一次角色**人格**分析。回复前由
+  `MemoryManager.get_context_traced()` 把命中内容注入 system（上限 2000 tokens）——
+  她真的"记得"。全过程带召回 trace，`GET /memory/api` 能看到每轮召回了哪些条、
+  各自分数与命中词；落盘在 `notes/<user_id>/memory/{recent,timeindex,facts,reflection,persona}/`。
 - **短期窗口**：会话历史上限 40 条，防止上下文膨胀。
 - **自视身份层（Self-Identity）**：带 VLM 的模型"认不出自己"时，系统不依赖模型自觉，而是走
   一条确定性的外挂识别链——用户图片 → 中立 VLM 裸描述（不喂身份信息，避免确认偏误）→
@@ -270,8 +286,9 @@ curl -X POST http://127.0.0.1:8765/memory/clear \
 
 ## 下一步（按序）
 
-1. 跑通对话 → 2. ✅ 记忆升级 P0（SQLite + BM25 + 重要度 + 去重，已落地）→
-3. P1 反思层（定期把笔记综合成洞察：事实→反思→人格）→ 4. P2 中二/博士状态机
+1. 跑通对话 → 2. ✅ 记忆升级（`core/memory/` 五维：工作/近期/事实/反思/人格，已落地）→
+3. △ P1 反思层（`reflection.py` 简化版已接上：事实→反思→人格，待打磨成真正的
+   「定期综合」）→ 4. P2 中二/博士状态机
 （借鉴 N.E.K.O. CognitionMode）→ 5. 接入路由小模型 → 6. Plugin 能力层
 （RVC 语音、图像生成等，单独排期）→ 7. 界面壳（API 已就位，Flutter/Swift 壳
 直接 POST /chat 即可，动作描写按需取字段）。

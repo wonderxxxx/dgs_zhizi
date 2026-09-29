@@ -30,9 +30,10 @@ provider:
   # api_key: "${ARK_API_KEY}"
 
 memory:
-  engine: "sqlite_bm25"     # v2：SQLite 持久化 + BM25 倒排检索（零依赖）；旧 JSONL 首次启动自动迁移
-  note_file: "notes"        # 「观测笔记」目录（每用户一个子目录，内含 notes.db）
-  top_k: 5                  # 每轮最多注入的笔记条数
+  note_file: "notes"        # 记忆落盘根目录：每用户一个子目录，内含 memory/ 五维库
+                            # （recent / timeindex / facts / reflection / persona）
+  # 每轮召回条数与注入上限写在代码里：core/memory/manager.recall_trace(top_k=5)、
+  # core/persona.build_messages(get_context_traced max_tokens=2000)
 
 attachments:
   caption: true             # 图片内容一句话说明（VLM 描述）：随该轮写进记忆，她记得你给她看过什么
