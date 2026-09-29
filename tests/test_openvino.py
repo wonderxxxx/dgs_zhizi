@@ -59,8 +59,8 @@ def main():
         check("不存在的路径不报错", not llm.is_openvino_model_dir(
             os.path.join(tmp, "nope")))
 
-        # ── 2. 多模态判定：不被 mlx_vlm 缺失短路 ──────────────────────
-        # 这是本分支最容易回归的点：Windows 上没有 mlx_vlm，
+        # ── 2. 多模态判定：按 IR 目录结构判定 ──────────────────────────
+        # 这是本分支最容易回归的点：带视觉塔的模型不能被误判成纯文本
         # 旧实现 import 失败直接 return False，gemma3 的视觉塔会被误判成纯文本
         check("文本 IR：auto 判定为非多模态",
               llm.detect_multimodal(text_dir, "auto") is False)
@@ -68,7 +68,7 @@ def main():
               llm.detect_multimodal(vlm_dir, "auto") is True)
         check("multimodal=false 强制关掉视觉塔",
               llm.detect_multimodal(vlm_dir, "false") is False)
-        check("multimodal=true 强制开启（不需要 mlx_vlm）",
+        check("multimodal=true 强制开启",
               llm.detect_multimodal(text_dir, True) is True)
         check("带视觉塔目录有 vision 标记", llm.ov_has_vision(vlm_dir))
         check("纯文本目录无 vision 标记", not llm.ov_has_vision(text_dir))
@@ -116,8 +116,6 @@ def main():
               llm.LLMClient._ov_image_placeholders([msgs[0]], 1)[0] == msgs[0])
 
         # ── 6. 切模型只清当前 provider 的执行器 ─────────────────────────
-        # 回归点：旧实现在切模型时无条件 new 一个 MLX 执行器，
-        # 在这台 Intel 机器上会让线程去 import mlx，白等 30 秒
         class FakeExec:
             def __init__(self):
                 self.cleared = 0
@@ -126,17 +124,15 @@ def main():
                 self.cleared += 1
 
         fake_ov = FakeExec()
-        saved = (llm._ov_executor, llm._mlx_executor, llm._ACTIVE_PROVIDER)
-        llm._ov_executor, llm._mlx_executor, llm._ACTIVE_PROVIDER = fake_ov, None, "openvino"
+        saved = (llm._ov_executor, llm._ACTIVE_PROVIDER)
+        llm._ov_executor, llm._ACTIVE_PROVIDER = fake_ov, "openvino"
         try:
             llm.set_active_model(os.path.join(tmp, "qwen2-7b-int4-ov"))
             check("openvino 下切模型清掉 OV 引擎缓存", fake_ov.cleared == 1,
                   f"cleared={fake_ov.cleared}")
-            check("openvino 下不会去构造 MLX 执行器",
-                  llm._mlx_executor is None, f"got={llm._mlx_executor}")
             check("现行模型已更新", llm.get_active_model().endswith("qwen2-7b-int4-ov"))
         finally:
-            llm._ov_executor, llm._mlx_executor, llm._ACTIVE_PROVIDER = saved
+            llm._ov_executor, llm._ACTIVE_PROVIDER = saved
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

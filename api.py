@@ -336,7 +336,7 @@ def make_handler(users, api_key="", dashboard_enabled=True):
             })
 
         def _model_switch(self):
-            """POST /model：切换现行模型（mlx 场景释放旧引擎，下次请求惰性重载）。"""
+            """POST /model：切换现行模型（openvino 场景释放旧引擎，下次请求惰性重载）。"""
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length).decode("utf-8")
@@ -549,7 +549,7 @@ def main():
     print(f"  GET  /health    健康检查")
     print(f"  GET  /identity   自视身份卡 + 自识别开关状态")
     print(f"  GET  /model     模型切换器：现行模型 + 可切换清单")
-    print(f"  POST /model     JSON('model': 路径) → 切换现行模型（mlx 释放旧引擎惰性重载）")
+    print(f"  POST /model     JSON('model': 路径) → 切换现行模型（openvino 释放旧引擎惰性重载）")
     print(f"  GET  /metrics   指标 JSON")
     print(f"  GET  /events    SSE 事件流")
     print(f"  GET  /chat     聊天页面")

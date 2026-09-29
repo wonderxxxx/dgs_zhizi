@@ -1,7 +1,5 @@
 openai>=3.14.1
 pyyaml>=6.0.3
-mlx-lm>=0.31.3; sys_platform == "darwin"
-mlx-vlm>=0.7.2; sys_platform == "darwin"
-# openvino 分支：Intel 进程内推理（Windows / Linux）；darwin 走上面的 mlx
+# openvino：Intel 进程内推理（Windows / Linux）
 openvino-genai>=2025.4.0; sys_platform != "darwin"
 pillow>=12.3.0; sys_platform != "darwin"
