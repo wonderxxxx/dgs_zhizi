@@ -110,7 +110,7 @@ provider:
 
 | device | 加载 | 解码 | 说明 |
 | --- | --- | --- | --- |
-| `GPU`（核显 + CACHE_DIR 命中） | ~5s | **9.5 tok/s** | 推荐；首次编译约 1 分钟 |
+| `GPU`（核显 + CACHE_DIR 命中） | ~5-10s | **9.5 tok/s** | 推荐；首次编译约 1 分钟 |
 | `CPU` | ~5s | 2.8 tok/s | 可用但偏慢 |
 | `NPU` | ✗ | — | 本版 openvino-genai 报 Unsupported |
 
@@ -123,7 +123,8 @@ provider:
 **已有模型**（`D:\ov_uv_llm\`，ModelScope `OpenVINO/<model>-ov` 下载）：
 
 - `qwen2-7b-int4-ov`：纯文本，4.9GB，默认
-- `gemma3-12b-int8-ov`：**多模态**（SigLIP 视觉塔），权重约 13GB，VLM 首次编译 ~2 分钟
+- `gemma3-12b-int8-ov`：**多模态**（SigLIP 视觉塔），权重约 13GB，
+  VLM 首次编译 ~2 分钟，缓存命中后进程启动 ~20s
 
 导出自己的模型：`optimum-cli export openvino --model <hf-id> --weight-format int4 --ratio 0.8 <输出目录>`。
 
