@@ -168,6 +168,51 @@ def main():
     L.vision_capability(d_t)
     check("探针结果有缓存", len(L._vision_probe_cache) == before)
 
+    # ── 缺视觉塔告警：每个模型每进程只出一次 ────────────────────
+    # 模型切换器每列一次模型、每次带图请求都会重新判一遍；不去重会反复刷屏，
+    # 且 metrics.emit 每次都往内存 events 列表追加，涨个没完。
+    L._vision_missing_warned.clear()
+    calls = {"warn": 0, "emit": 0, "inc": 0}
+    real_warn, real_emit, real_inc = L.logger.warning, L.metrics.emit, L.metrics.inc
+
+    def spy_warn(*a, **k):
+        calls["warn"] += 1
+        return real_warn(*a, **k)
+
+    def spy_emit(kind, **f):
+        calls["emit"] += 1
+        return real_emit(kind, **f)
+
+    def spy_inc(name, **f):
+        calls["inc"] += 1
+        return real_inc(name, **f)
+
+    L.logger.warning, L.metrics.emit, L.metrics.inc = spy_warn, spy_emit, spy_inc
+    try:
+        for _ in range(5):
+            L.vision_capability(d_t)
+        check("告警去重：缺视觉塔连判 5 次只警告 1 次", calls["warn"] == 1, f"warn={calls['warn']}")
+        check("告警去重：结构化事件也只发 1 次", calls["emit"] == 1, f"emit={calls['emit']}")
+        check("告警去重：指标只累加 1 次", calls["inc"] == 1, f"inc={calls['inc']}")
+        check("告警去重：判据本身不受影响（仍返回 False）",
+              L.vision_capability(d_t) is False)
+        # 有视觉塔的模型不受牵连，也不该产生告警
+        n = calls["warn"]
+        L.vision_capability(d_v)
+        L.vision_capability(d_v)
+        check("告警去重：有视觉塔的模型不误报", calls["warn"] == n, f"warn={calls['warn']}")
+        # 另一个缺塔模型要能各自警告一次（去重是按模型记账，不是全局一次性）
+        d_t2 = make_model(tmp, "pub-c/vlm-model", MODAL_CFG, TEXT_KEYS)
+        L.vision_capability(d_t2)
+        check("告警去重：换个模型仍会警告", calls["warn"] == n + 1, f"warn={calls['warn']}")
+        L.vision_capability(d_t2)
+        check("告警去重：第二个模型也只警告一次", calls["warn"] == n + 1, f"warn={calls['warn']}")
+        check("告警去重：去重集合按模型分别记账",
+              d_t in L._vision_missing_warned and d_t2 in L._vision_missing_warned)
+        check("告警去重：有视觉塔的模型不进集合", d_v not in L._vision_missing_warned)
+    finally:
+        L.logger.warning, L.metrics.emit, L.metrics.inc = real_warn, real_emit, real_inc
+
     print(f"\n通过 {sum(PASS)}/{len(PASS)}")
     return 0 if all(PASS) else 1
 

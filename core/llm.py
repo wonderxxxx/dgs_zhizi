@@ -302,6 +302,11 @@ _VISION_WEIGHT_MARKERS = (
 )
 _CONFIG_MODAL_KEYS = ("vision_config", "image_token_id", "video_token_id", "audio_config")
 _vision_probe_cache: dict = {}
+# 缺视觉塔的模型每个进程只警告一次：模型切换器每列一次模型、每次带图请求
+# 都会重新判一遍，不去重的话同一条警告会反复刷屏，metrics.emit 还会往
+# 内存 events 列表里无限追加。
+_vision_missing_warned: set = set()
+_vision_missing_lock = threading.Lock()
 
 
 def _vision_disabled(model) -> bool:
@@ -394,6 +399,22 @@ def _cfg_claims_modal(model_path) -> bool:
     return isinstance(cfg, dict) and any(k in cfg for k in _CONFIG_MODAL_KEYS)
 
 
+def _warn_vision_missing_once(model_path) -> bool:
+    """首次发现该模型缺视觉塔才返回 True（并负责记指标+告警）。"""
+    with _vision_missing_lock:
+        if model_path in _vision_missing_warned:
+            return False
+        _vision_missing_warned.add(model_path)
+    metrics.inc("mlx_vision_weights_missing")
+    metrics.emit("vision_weights_missing", model=model_path, stage="probe")
+    logger.warning(
+        "%s 的 config 声明多模态，但权重里没有视觉塔（转换时漏了）——"
+        "已按纯文本模型处理，发图会报错。%s",
+        model_label(model_path), _vision_sibling_hint(model_path),
+    )
+    return True
+
+
 def vision_capability(model_path, setting="auto") -> bool:
     """该模型是否真能看图。config 只当线索，权重才是判据。"""
     forced = _forced_multimodal(setting)
@@ -405,13 +426,7 @@ def vision_capability(model_path, setting="auto") -> bool:
     if has is None:  # 判不出来（远端仓库等）：沿用 config 判据
         return True
     if not has:
-        metrics.inc("mlx_vision_weights_missing")
-        metrics.emit("vision_weights_missing", model=model_path, stage="probe")
-        logger.warning(
-            "%s 的 config 声明多模态，但权重里没有视觉塔（转换时漏了）——"
-            "已按纯文本模型处理，发图会报错。%s",
-            model_label(model_path), _vision_sibling_hint(model_path),
-        )
+        _warn_vision_missing_once(model_path)
     return has
 
 
