@@ -271,14 +271,38 @@ class Persona:
         return user, asst
 
     def _drop_last_turn(self):
-        """把最后一轮摘掉：先摘回复，再摘提问（顺序反了会摘错条）。"""
-        if self.memory_manager:
-            store = self.memory_manager.recent
-            store.pop_last("default", "assistant")
-            store.pop_last("default", "user")
-        else:
+        """把最后一轮摘掉：先摘回复，再摘提问（顺序反了会摘错条）。
+
+        工作记忆（recent）与时间索引（timeindex）一起回滚——只摘 recent 会
+        让被放弃的那句回复留在 BM25 召回源里，措辞和聊天记录对不上，反复
+        重新生成还会成倍堆积。时间索引按内容删（hash 唯一，同内容只可能一条），
+        前提是剩下的工作记忆里没有同样的内容——有就说明别的轮次还在用它。
+        """
+        if not self.memory_manager:
             self.history.pop()
             self.history.pop()
+            return
+        store = self.memory_manager.recent
+        asst = store.pop_last("default", "assistant")
+        store.pop_last("default", "user")
+        if asst:
+            self._forget_timeindex(asst.get("content", ""))
+
+    def _forget_timeindex(self, content):
+        """把一条消息从时间索引里抹掉；内容仍被别的轮次引用时保留。"""
+        text = (content or "").strip()
+        if not text:
+            return
+        store = self.memory_manager.recent
+        for msg in store.get_messages("default"):
+            if (msg.get("content") or "").strip() == text:
+                return
+        try:
+            if self.memory_manager.timeindex.forget(
+                    "default", text, category="conversation"):
+                metrics.inc("timeindex_forgotten")
+        except Exception as exc:   # 回滚不该拖垮重新生成
+            logger.warning("时间索引回滚失败: %s", exc)
 
     def _restore_last_turn(self, user_msg, asst_msg):
         """生成失败时原样放回这一轮（提问 + 旧回复），不能让用户丢了一句话。"""
@@ -290,7 +314,17 @@ class Persona:
             if user_msg.get("caption"):
                 extra["caption"] = user_msg["caption"]
             store.add_message("default", "user", user_msg.get("content", ""), **extra)
-            store.add_message("default", "assistant", asst_msg.get("content", ""))
+            content = asst_msg.get("content", "")
+            store.add_message("default", "assistant", content)
+            # _drop_last_turn 已把旧回复从时间索引抹了，这里补回来，
+            # 否则恢复后的这一轮召不到（提问那条没被删，不用补）
+            if (content or "").strip():
+                try:
+                    self.memory_manager.timeindex.add(
+                        user_id="default", content=content,
+                        category="conversation", importance=3)
+                except Exception as exc:
+                    logger.warning("时间索引恢复失败: %s", exc)
         else:
             self.history.append(dict(user_msg))
             self.history.append(dict(asst_msg))
@@ -333,8 +367,9 @@ class Persona:
     def regenerate(self):
         """丢掉最后一条助手回复，就同一句话重新回答（换模型后重试用）。
 
-        只回滚工作记忆里那一轮；事实/反思/时间索引里旧回复的痕迹保留——
-        跨维度级联删除代价远大于收益，也不影响下一轮上下文。
+        回滚范围：工作记忆 + 时间索引里旧回复那一条都清掉，不留「已被放弃的
+        回答」继续参与 BM25 召回。事实/反思/人格不动——它们只从你的提问抽取，
+        而提问本身没变，留着是对的；跨维度级联删除的代价远大于收益。
         图片沿用上一轮已落盘的引用（读回字节喂模型），不重复写盘、不重复描述。
         """
         user_msg, asst_msg = self._last_turn()

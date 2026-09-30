@@ -345,6 +345,32 @@ class TimeIndexedMemory:
             self._drop_index(memory_id)
             return True
     
+    def forget(self, user_id: str, content: str, category: str = None) -> bool:
+        """按内容删除（重新生成回滚用）。
+
+        hash 上有 UNIQUE(user_id, hash) 索引，add() 本身按内容去重，所以
+        「同一条内容」在索引里只可能有一条，删掉不会误伤别的轮次。
+        老数据没有 doc id 关联时也能删。
+        """
+        digest = _sha256(_normalize((content or "").strip()))
+        with self._lock:
+            if category:
+                row = self._conn.execute(
+                    "SELECT id FROM memories WHERE user_id = ? AND hash = ? AND category = ?",
+                    (user_id, digest, category),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT id FROM memories WHERE user_id = ? AND hash = ?",
+                    (user_id, digest),
+                ).fetchone()
+            if not row:
+                return False
+            with self._conn:
+                self._conn.execute("DELETE FROM memories WHERE id = ?", (row[0],))
+            self._drop_index(row[0])
+            return True
+
     def clear(self, user_id: str) -> int:
         """清空该用户的全部近期记忆。返回删除条数。"""
         with self._lock:

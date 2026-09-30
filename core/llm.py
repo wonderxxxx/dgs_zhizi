@@ -37,6 +37,7 @@ class _MlxExecutor:
     def __init__(self):
         self._q: queue.Queue = queue.Queue()
         self._engines = {}  # model_path -> ("lm"|"vlm", model, processor)
+        self._no_vision = set()  # 声称多模态但视觉塔缺权重的模型
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="mlx-infer", daemon=True)
@@ -88,6 +89,13 @@ class _MlxExecutor:
                         from mlx_vlm import load as vlm_load
 
                         engine = ("vlm",) + vlm_load(model_path)
+                        if _vision_disabled(engine[1]):
+                            self._no_vision.add(model_path)
+                            metrics.emit("vision_weights_missing",
+                                         model=model_path, stage="load")
+                            logger.warning(
+                                "mlx 视觉塔无权重 model=%s（transformers 已禁用 "
+                                "vision_tower），按纯文本处理", model_path)
                     else:
                         from mlx_lm import load
 
@@ -114,6 +122,11 @@ class _MlxExecutor:
         """清空引擎缓存（切换模型时释放显存/内存）。"""
         with self._lock:
             self._engines.clear()
+            self._no_vision.clear()
+
+    def vision_missing(self, model_path) -> bool:
+        """已加载的模型是否缺视觉塔权重（mlx_vlm 加载后复查的结果）。"""
+        return model_path in self._no_vision
 
     def generate(self, model_path, prompt, max_tokens, temperature, images=None):
         """images: list[路径]，仅 vlm 引擎使用。images 与 prompt 中占位符一一对应。"""
@@ -177,18 +190,24 @@ def get_mlx_executor() -> _MlxExecutor:
 # ── 模型切换器：注册表 + 全局现行模型 ───────────────────────────────
 _ACTIVE_MODEL: str = ""
 _MODEL_REGISTRY: List[str] = []
-_DEFAULT_MODEL_DIR = "/Users/dango_studio/.lmstudio/models/lmstudio-community"
+_DEFAULT_MODEL_DIR = "/Users/dango_studio/.lmstudio/models"
 
 
 def _looks_like_model_dir(path) -> bool:
-    """目录内含 config.json 且带权重文件（safetensors/npz/gguf）即视为一个模型。"""
+    """目录内含权重文件即视为一个模型。
+
+    - HF/MLX 权重目录：有 config.json 且带 safetensors/npz
+    - GGUF 目录：无 config.json，只要有一个非 mmproj/imatrix 的 .gguf 即可
+    """
     try:
         if not os.path.isdir(path):
             return False
-        if not os.path.isfile(os.path.join(path, "config.json")):
-            return False
-        for name in os.listdir(path):
-            if name.endswith((".safetensors", ".npz", ".gguf")):
+        names = os.listdir(path)
+        has_config = os.path.isfile(os.path.join(path, "config.json"))
+        for name in names:
+            if name.endswith((".safetensors", ".npz")) and has_config:
+                return True
+            if name.endswith(".gguf") and not name.startswith(("mmproj-", "imatrix-")):
                 return True
     except OSError:
         return False
@@ -226,6 +245,14 @@ def get_model_registry() -> List[str]:
     return list(_MODEL_REGISTRY)
 
 
+def model_label(path: str) -> str:
+    """下拉框展示名：多级路径带上发布者目录，避免同名模型看不出区别。"""
+    parts = [p for p in (path or "").strip().rstrip("/").split("/") if p]
+    if not parts:
+        return ""
+    return "/".join(parts[-2:]) if len(parts) >= 3 else parts[-1]
+
+
 def get_active_model() -> str:
     return _ACTIVE_MODEL
 
@@ -261,67 +288,234 @@ def resolve_model_switch(path: str) -> str:
 def active_vision() -> bool:
     if not _ACTIVE_MODEL:
         return False
-    return detect_multimodal(_ACTIVE_MODEL, "auto")
+    return vision_capability(_ACTIVE_MODEL, "auto")
+
+
+# ── 视觉能力探针 ───────────────────────────────────────────────────
+# config.json 里的 image_token_id / vision_config 只说明「架构声称多模态」，
+# 不代表权重里真有视觉塔：转换时漏掉视觉塔的模型（config 照旧、权重只有语言
+# 模型）mlx_vlm 照样加载成功，直到带图推理才在 vision_tower=None 上炸成
+# 'NoneType' object is not callable。所以判据是权重，不是描述文件。
+_VISION_WEIGHT_MARKERS = (
+    "vision", "visual", "vpm", "image_tower", "img_tower",
+    "mm_projector", "multi_modal_projector", "resampler", "perceiver",
+)
+_CONFIG_MODAL_KEYS = ("vision_config", "image_token_id", "video_token_id", "audio_config")
+_vision_probe_cache: dict = {}
+
+
+def _vision_disabled(model) -> bool:
+    """加载后复查：transformers 找不到视觉塔权重时会把子模块置 None
+    （gemma4 是 vision_tower / embed_vision），此时带图推理必崩。
+    类属性与实例属性都查（mlx Module 挂在实例上，替身/降级实现可能挂类上）。"""
+    names = set(vars(model)) if hasattr(model, "__dict__") else set()
+    names.update(n for n in dir(type(model)) if not n.startswith("_"))
+    for name in names:
+        if not any(m in name for m in ("vision", "visual", "vpm")):
+            continue
+        try:
+            value = getattr(model, name)
+        except Exception:
+            continue
+        if value is None:
+            return True
+    return False
+
+
+def _tensor_names(model_path) -> Optional[List[str]]:
+    """列出权重张量名；读不到返回 None（调用方据此放弃判断）。"""
+    index = os.path.join(model_path, "model.safetensors.index.json")
+    if os.path.isfile(index):
+        try:
+            with open(index, encoding="utf-8") as fh:
+                return list(json.load(fh).get("weight_map", {}).keys())
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return None
+    try:
+        names = os.listdir(model_path)
+    except OSError:
+        return None
+    for name in sorted(names):  # 单文件 safetensors：只读文件头，不加载权重
+        if name.endswith(".safetensors"):
+            try:
+                from safetensors import safe_open
+
+                with safe_open(os.path.join(model_path, name), framework="numpy") as fh:
+                    return list(fh.keys())
+            except Exception:
+                return None
+    for name in sorted(names):
+        if name.endswith(".npz"):
+            try:
+                import zipfile
+
+                with zipfile.ZipFile(os.path.join(model_path, name)) as zf:
+                    return [n[:-4] for n in zf.namelist() if n.endswith(".npy")]
+            except Exception:
+                return None
+    return None
+
+
+def _has_vision_weights(model_path) -> Optional[bool]:
+    """权重里是否含视觉塔张量。None = 判不出来（GGUF / 远端仓库等）。"""
+    if model_path in _vision_probe_cache:
+        return _vision_probe_cache[model_path]
+    names = _tensor_names(model_path)
+    if names is None:
+        return None
+    # 视觉塔挂在模型根下（vision_tower.* / model.visual.* / language_model.vision_tower.*）
+    hit = any(
+        any(m in seg for m in _VISION_WEIGHT_MARKERS)
+        for key in names
+        for seg in key.split(".")[:3]
+    )
+    _vision_probe_cache[model_path] = hit
+    return hit
+
+
+def _forced_multimodal(setting) -> Optional[bool]:
+    """True/False = 用户显式指定；None = auto。"""
+    if setting is True:
+        return True
+    text = str(setting).strip().lower()
+    if text == "true":
+        return True
+    if text in ("false", "none", "0"):
+        return False
+    return None
+
+
+def _cfg_claims_modal(model_path) -> bool:
+    try:
+        with open(os.path.join(model_path, "config.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(cfg, dict) and any(k in cfg for k in _CONFIG_MODAL_KEYS)
+
+
+def vision_capability(model_path, setting="auto") -> bool:
+    """该模型是否真能看图。config 只当线索，权重才是判据。"""
+    forced = _forced_multimodal(setting)
+    if forced is not None:
+        return forced
+    if not model_path or not _cfg_claims_modal(model_path):
+        return False
+    has = _has_vision_weights(model_path)
+    if has is None:  # 判不出来（远端仓库等）：沿用 config 判据
+        return True
+    if not has:
+        metrics.inc("mlx_vision_weights_missing")
+        metrics.emit("vision_weights_missing", model=model_path, stage="probe")
+        logger.warning(
+            "%s 的 config 声明多模态，但权重里没有视觉塔（转换时漏了）——"
+            "已按纯文本模型处理，发图会报错。%s",
+            model_label(model_path), _vision_sibling_hint(model_path),
+        )
+    return has
+
+
+def _vision_sibling_hint(model_path) -> str:
+    """同名但带视觉塔的兄弟版本（多在别的发布者目录下），给个可点的提示。"""
+    want = os.path.basename(model_path.rstrip("/"))
+    for other in get_model_registry():
+        if other == model_path or os.path.basename(other) != want:
+            continue
+        if vision_capability(other, "auto"):
+            return f"可改用 {other}"
+    return "同类可换带视觉塔的版本。"
+
+
+def client_vision(client) -> bool:
+    """某个 LLMClient 能否看图（含 provider.multimodal 强制开关与加载后复查）。"""
+    if client is None:
+        return False
+    flag = getattr(client, "vision", None)
+    if flag is None:  # 非 mlx provider：由服务端决定
+        return bool(getattr(client, "multimodal", False))
+    if not flag or getattr(client, "provider_type", "") != "mlx":
+        return bool(flag)
+    return not get_mlx_executor().vision_missing(getattr(client, "model", ""))
 
 
 def detect_multimodal(model_path, setting="auto") -> bool:
     """判断某 MLX 模型是否走多模态引擎（mlx_vlm）。
 
-    - setting: True 强制多模态；False 强制纯文本；"auto" 按权重试探。
-    - auto 判据：config.json 含 image_token_id / vision_config / audio_config，
-      mlx_vlm 能加载该 model_type，且权重里含 vision_tower。
-    """
-    if setting is True or str(setting).lower() == "true":
-        return True
-    try:
-        if str(setting).lower() in ("false", "none", "0"):
-            return False
-    except Exception:
-        return False
+    这里只管「引擎选择」：架构是 multimodal 类就得用 mlx_vlm 加载（纯文本
+    推理也依赖它），哪怕这份权重没带视觉塔。带图能力由 vision_capability 判定。
 
+    - setting: True 强制多模态；False 强制纯文本；"auto" 看 config 是否声明模态。
+    """
+    forced = _forced_multimodal(setting)
+    if forced is not None:
+        return forced
     try:
         importlib.import_module("mlx_vlm")
     except ImportError:
         return False
-
-    try:
-        cfg_path = os.path.join(model_path, "config.json")
-        with open(cfg_path, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return False
-
-    # 显式模态标记最为可靠
-    if any(k in cfg for k in ("image_token_id", "vision_config",
-                              "audio_config", "video_token_id")):
-        return True
-
-    return False
+    return _cfg_claims_modal(model_path)
 
 
-# Gemma4 等 channel 模型：思考段 <|channel>…<channel|>，其后才是正文
-_THINK_MARK = "<|channel>"
+# Gemma4 等 channel 模型有两套思考标记，都要认：
+# - 模板态：<|channel|>thought\n<channel|>正文       （split_thinking 宏的切法）
+# - 生成态：<|channel|>analysis<|message|>思考<|end|>…<|channel|>final<|message|>正文
+# 后者带 <|message|> 且用 <|end|> 收尾，没有无管道的 <channel|>，只按模板那套切
+# 会一个标记都匹配不到，整段思考原文直接当回复落进记忆。
+_CHANNEL_OPEN = "<|channel|>"
+_CHANNEL_BODY = "<|message|>"
+_CHANNEL_END = "<|end|>"
 _THINK_END = "<channel|>"
-_TURN_MARKS = ("<turn|>", "<|turn>", "<eos>")
+_THINK_CHANNELS = ("analysis", "thought", "thinking", "reasoning",
+                   "commentary", "scratchpad", "reflection", "plan")
+_CONTROL_MARKS = (
+    "<channel|>", "<|channel|>", "<|message|>", "<|start|>", "<|end|>",
+    "<turn|>", "<|turn>", "<eos>", "<|eos|>", "<end_of_turn>", "<|end_of_turn|>",
+)
+
+
+def _strip_channel_segments(text):
+    """按 <|channel|>名称<|message|>正文<|end|> 拆段，只留非思考通道的正文。
+
+    段与段之间的 <|start|>assistant 之类的结构标记直接丢掉。正文永远在最后一个
+    通道里，但按通道名判断更稳——final 之外的（如 tool_call）也该留。
+    """
+    if _CHANNEL_OPEN not in text or _CHANNEL_BODY not in text:
+        return text
+    kept, pos = [], 0
+    while True:
+        head = text.find(_CHANNEL_OPEN, pos)
+        if head < 0:
+            break
+        name_start = head + len(_CHANNEL_OPEN)
+        name_end = min(
+            (i for i in (text.find(_CHANNEL_BODY, name_start),
+                         text.find(_CHANNEL_END, name_start))
+             if i >= 0),
+            default=len(text),
+        )
+        name = text[name_start:name_end].strip().lower()
+        close = text.find(_CHANNEL_END, name_end)
+        body_end = len(text) if close < 0 else close
+        if name not in _THINK_CHANNELS:
+            kept.append(text[name_end:body_end])
+        pos = body_end + len(_CHANNEL_END) if close >= 0 else body_end
+    return "".join(kept)
 
 
 def _strip_mlx_reply(text):
-    """去掉 thought channel / 残留控制符，只留回复正文。
-
-    与该模型 chat_template 的 strip_thinking 宏一致：
-    按 <channel|> 切开，含 <|channel> 的段是思考，丢弃；其余段保留。
-    """
+    """去掉思考通道 / 残留控制符，只留回复正文。"""
     if not text:
         return ""
-    parts = text.split(_THINK_END)
+    out = _strip_channel_segments(text)
+    parts = out.split(_THINK_END)
     kept = []
     for part in parts:
-        if _THINK_MARK in part:
-            kept.append(part.split(_THINK_MARK, 1)[0])
+        if _CHANNEL_OPEN in part:
+            kept.append(part.split(_CHANNEL_OPEN, 1)[0])
         else:
             kept.append(part)
     out = "".join(kept)
-    for mark in _TURN_MARKS:
+    for mark in _CONTROL_MARKS:
         out = out.replace(mark, "")
     return out.strip()
 
@@ -360,10 +554,12 @@ class LLMClient:
         if self.provider_type == "mlx":
             self.client = None
             self.multimodal = detect_multimodal(self.model, self.multimodal_setting)
+            self.vision = vision_capability(self.model, self.multimodal_setting)
             get_mlx_executor().load(self.model, multimodal=self.multimodal)
             return
 
         self.multimodal = True  # OpenAI 兼容服务端透传内容块，由服务端决定是否支持
+        self.vision = True
         self._engine = None
         base_url = provider["base_url"]
         api_key = provider.get("api_key", "")
@@ -387,6 +583,7 @@ class LLMClient:
             self.model = model
             if self.provider_type == "mlx":
                 self.multimodal = detect_multimodal(model, self.multimodal_setting)
+                self.vision = vision_capability(model, self.multimodal_setting)
         t0 = time.perf_counter()
         metrics.inc("llm_calls")
         try:
@@ -466,6 +663,7 @@ class LLMClient:
 
     def _chat_mlx(self, messages, temperature, images=None, enable_thinking=None):
         executor = get_mlx_executor()
+        model_path = self.model  # 已在 chat() 同步为现行模型
         image_paths = None
         tmp_files = []
         if images:
@@ -473,6 +671,12 @@ class LLMClient:
                 raise RuntimeError(
                     "当前模型不支持多模态（provider.multimodal 未开启），"
                     "上传的图片无法识别"
+                )
+            if not client_vision(self):
+                raise RuntimeError(
+                    f"{model_label(model_path)} 看不了图：权重里没有视觉塔"
+                    f"（config 虽声明了多模态，转换时只带了语言模型）。"
+                    f"{_vision_sibling_hint(model_path)}"
                 )
             # mlx_vlm 只接受文件路径（BytesIO 会崩），base64 落盘到临时文件
             import tempfile
@@ -486,9 +690,14 @@ class LLMClient:
                 image_paths = tmp_files
 
         # chat template / 生成都收拢到推理线程（纯 CPU tokenize 那步也在此线程更稳）
-        model_path = self.model  # 已在 chat() 同步为现行模型
         if executor._engines.get(model_path) is None:
             executor.load(model_path, multimodal=self.multimodal)
+        if image_paths and executor.vision_missing(model_path):
+            # 探针判不出来时的兜底：加载后复查发现视觉塔确实缺权重
+            raise RuntimeError(
+                f"{model_label(model_path)} 看不了图：加载后视觉塔为空，"
+                f"这份权重只带了语言模型。{_vision_sibling_hint(model_path)}"
+            )
 
         def build_prompt():
             engine = executor._engines[model_path]

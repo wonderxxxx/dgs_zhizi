@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from .llm import client_vision
 from .metrics import logger, metrics
 
 IMG_DIR = "images"
@@ -153,7 +154,7 @@ def caption(llm, images: List[dict], described: Optional[dict] = None) -> str:
     reuse = caption_from(described)
     if reuse:
         return reuse
-    if llm is None or not getattr(llm, "multimodal", False):
+    if llm is None or not client_vision(llm):
         return ""
     t0 = time.perf_counter()
     try:

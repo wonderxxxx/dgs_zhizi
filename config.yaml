@@ -10,8 +10,8 @@ provider:
   temperature: 0.85
   max_tokens: 1024            # 单次回复生成上限
   enable_thinking: false      # 对话关思考：更快；true 时需加大 max_tokens，防思考截断空回复
-  multimodal: auto            # auto=按权重检测（mlx_vlm）；true/false 强制开启/关闭多模态
-  model_dir: "/Users/dango_studio/.lmstudio/models/lmstudio-community"  # 模型切换器扫描目录
+  multimodal: auto            # auto=按权重里的视觉塔判定能不能看图（config 只当线索，转换时漏了视觉塔的权重会被识破）；true/false 强制开启/关闭
+  model_dir: "/Users/dango_studio/.lmstudio/models"  # 模型切换器扫描根目录（各发布者子目录会被一并扫描）
 
   # —— 本地服务示例：type 改 local 并换成下面配置 ——
   # base_url: "http://localhost:1234/v1"   # LM Studio

@@ -329,8 +329,8 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                 "current": llm_mod.get_active_model(),
                 "vision": llm_mod.active_vision(),
                 "models": [
-                    {"path": m, "name": os.path.basename(m),
-                     "vision": llm_mod.detect_multimodal(m, "auto")}
+                    {"path": m, "name": llm_mod.model_label(m),
+                     "vision": llm_mod.vision_capability(m, "auto")}
                     for m in reg
                 ],
             })
@@ -401,8 +401,8 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                     result.pop("actions", None)
                 result["user_id"] = user_id
                 result["character"] = persona.character
-                result["image_acked"] = bool(images) and getattr(
-                    persona.llm, "multimodal", False
+                result["image_acked"] = bool(images) and llm_mod.client_vision(
+                    persona.llm
                 )
                 metrics.inc("http_chat_ok")
                 self._send(200, result)
