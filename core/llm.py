@@ -8,6 +8,7 @@ provider.type：
 """
 
 import base64
+import hashlib
 import importlib
 import json
 import os
@@ -304,9 +305,95 @@ _CONFIG_MODAL_KEYS = ("vision_config", "image_token_id", "video_token_id", "audi
 _vision_probe_cache: dict = {}
 # 缺视觉塔的模型每个进程只警告一次：模型切换器每列一次模型、每次带图请求
 # 都会重新判一遍，不去重的话同一条警告会反复刷屏，metrics.emit 还会往
-# 内存 events 列表里无限追加。
-_vision_missing_warned: set = set()
+# 内存 events 列表里无限追加。指纹变了（模型被修好/重下）则重新提示。
+_vision_missing_warned: dict = {}
 _vision_missing_lock = threading.Lock()
+
+# 「已提示过的坏 config」跨重启也只提示一次，落盘记账。纯提示抑制机制，
+# 读不到/写不了/文件损坏都必须静默退化，绝不能影响视觉判据本身。
+_STATE_PATH = os.environ.get("ZHIZI_STATE_PATH") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".zhizi_state.json"
+)
+_state_cache: Optional[dict] = None
+_state_lock = threading.Lock()
+
+
+def _load_state() -> dict:
+    """读运行时状态；只读一次，坏了当空。"""
+    global _state_cache
+    with _state_lock:
+        if _state_cache is not None:
+            return _state_cache
+        try:
+            with open(_STATE_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+            _state_cache = data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            _state_cache = {}
+        return _state_cache
+
+
+def _save_state() -> None:
+    """原子写。失败只记 debug，绝不抛——提示抑制不该拖垮视觉判据。"""
+    with _state_lock:
+        if _state_cache is None:
+            return
+        try:
+            os.makedirs(os.path.dirname(_STATE_PATH) or ".", exist_ok=True)
+            tmp = f"{_STATE_PATH}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(_state_cache, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, _STATE_PATH)  # 原子替换，避免半截文件
+        except OSError as exc:
+            logger.debug("state 写入失败（忽略）: %s", exc)
+
+
+def _vision_fingerprint(model_path) -> str:
+    """config 内容 + 权重文件清单的指纹。
+
+    两者任一变化（改了 config、重新下载/转换权重）指纹就变，届时重新提示，
+    这样「模型修好了」能被看见，而反复启动不会一直刷同一条坏 config。
+    """
+    h = hashlib.sha256()
+    try:
+        with open(os.path.join(model_path, "config.json"), "rb") as fh:
+            h.update(hashlib.sha256(fh.read()).digest())
+    except OSError:
+        h.update(b"no-config")
+    try:
+        for name in sorted(os.listdir(model_path)):
+            if not name.endswith((".safetensors", ".npz", ".gguf", ".bin")):
+                continue
+            st = os.stat(os.path.join(model_path, name))
+            h.update(f"{name}:{st.st_size}:{st.st_mtime_ns}".encode())
+    except OSError:
+        h.update(b"no-weights")
+    return h.hexdigest()[:16]
+
+
+def _record_vision_check(model_path, fingerprint) -> bool:
+    """这条坏 config 之前提示过没有。顺便负责落盘。"""
+    checks = _load_state().setdefault("vision_checks", {})
+    if not isinstance(checks, dict):
+        checks = {}
+        _load_state()["vision_checks"] = checks
+    rec = checks.get(model_path)
+    if isinstance(rec, dict) and rec.get("fingerprint") == fingerprint:
+        return True
+    checks[model_path] = {
+        "fingerprint": fingerprint,
+        "first_seen": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    _save_state()
+    return False
+
+
+def _forget_vision_check(model_path) -> None:
+    """模型已修好（判出视觉塔）就把记录清掉，将来再坏才会重新提示。"""
+    checks = _load_state().get("vision_checks")
+    if isinstance(checks, dict) and model_path in checks:
+        del checks[model_path]
+        _save_state()
 
 
 def _vision_disabled(model) -> bool:
@@ -400,11 +487,18 @@ def _cfg_claims_modal(model_path) -> bool:
 
 
 def _warn_vision_missing_once(model_path) -> bool:
-    """首次发现该模型缺视觉塔才返回 True（并负责记指标+告警）。"""
+    """首次发现该模型缺视觉塔才返回 True（并负责记指标+告警）。
+
+    两级去重：进程内按指纹去重（挡同一进程里的反复调用），落盘按指纹记账
+    （跨重启也只提示一次）。指纹变了说明 config 或权重动过，重新提示。
+    """
+    fp = _vision_fingerprint(model_path)
     with _vision_missing_lock:
-        if model_path in _vision_missing_warned:
+        if _vision_missing_warned.get(model_path) == fp:
             return False
-        _vision_missing_warned.add(model_path)
+        _vision_missing_warned[model_path] = fp
+    if _record_vision_check(model_path, fp):
+        return False  # 之前（别的进程）已经提示过同一份坏 config
     metrics.inc("mlx_vision_weights_missing")
     metrics.emit("vision_weights_missing", model=model_path, stage="probe")
     logger.warning(
@@ -425,9 +519,11 @@ def vision_capability(model_path, setting="auto") -> bool:
     has = _has_vision_weights(model_path)
     if has is None:  # 判不出来（远端仓库等）：沿用 config 判据
         return True
-    if not has:
-        _warn_vision_missing_once(model_path)
-    return has
+    if has:
+        _forget_vision_check(model_path)  # 修好了就销账，将来再坏才重新提示
+        return True
+    _warn_vision_missing_once(model_path)
+    return False
 
 
 def _vision_sibling_hint(model_path) -> str:

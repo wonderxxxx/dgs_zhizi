@@ -171,7 +171,10 @@ def main():
     # ── 缺视觉塔告警：每个模型每进程只出一次 ────────────────────
     # 模型切换器每列一次模型、每次带图请求都会重新判一遍；不去重会反复刷屏，
     # 且 metrics.emit 每次都往内存 events 列表追加，涨个没完。
+    # 状态文件指到临时目录，别污染真实的 .zhizi_state.json。
     L._vision_missing_warned.clear()
+    L._state_cache = None
+    L._STATE_PATH = os.path.join(tmp, "state.json")
     calls = {"warn": 0, "emit": 0, "inc": 0}
     real_warn, real_emit, real_inc = L.logger.warning, L.metrics.emit, L.metrics.inc
 
@@ -188,6 +191,7 @@ def main():
         return real_inc(name, **f)
 
     L.logger.warning, L.metrics.emit, L.metrics.inc = spy_warn, spy_emit, spy_inc
+    real_path = L._STATE_PATH
     try:
         for _ in range(5):
             L.vision_capability(d_t)
@@ -210,8 +214,79 @@ def main():
         check("告警去重：去重集合按模型分别记账",
               d_t in L._vision_missing_warned and d_t2 in L._vision_missing_warned)
         check("告警去重：有视觉塔的模型不进集合", d_v not in L._vision_missing_warned)
+
+        # ── 落盘记账：跨重启也只提示一次 ──────────────────────
+        check("落盘：状态文件已生成", os.path.isfile(L._STATE_PATH))
+        rec = json.load(open(L._STATE_PATH, encoding="utf-8"))["vision_checks"]
+        check("落盘：记了坏 config 的指纹",
+              rec.get(d_t, {}).get("fingerprint") == L._vision_fingerprint(d_t), str(rec)[:120])
+        check("落盘：有权重的模型不记账", d_v not in rec)
+        # 模拟重启：进程内集合清空 + 状态重新从磁盘读
+        L._vision_missing_warned.clear()
+        L._state_cache = None
+        for _ in range(3):
+            L.vision_capability(d_t)
+        check("落盘：模拟重启后不再重复提示", calls["warn"] == n + 1, f"warn={calls['warn']}")
+        check("落盘：重启后判据仍正确", L.vision_capability(d_t) is False)
+
+        # ── 指纹变了（模型被重下/修好）→ 重新提示 ──────────────
+        with open(os.path.join(d_t, "config.json"), "a", encoding="utf-8") as fh:
+            fh.write("\n ")  # 改坏 config
+        L._vision_missing_warned.clear()
+        L._state_cache = None
+        L._vision_probe_cache.clear()
+        L.vision_capability(d_t)
+        check("落盘：config 变了则重新提示", calls["warn"] == n + 2, f"warn={calls['warn']}")
+
+        # ── 模型修好后销账，再坏才会重新提示 ──────────────────
+        L._vision_missing_warned.clear()
+        L._state_cache = None
+        L._vision_probe_cache.clear()
+        check("销账：修好后判出视觉塔", L.vision_capability(d_v) is True)
+        rec2 = json.load(open(L._STATE_PATH, encoding="utf-8"))["vision_checks"]
+        check("销账：有权重的模型不在记账里", d_v not in rec2)
+        n2 = calls["warn"]
+        L._forget_vision_check(d_t)  # 模拟 d_t 也被修好
+        rec3 = json.load(open(L._STATE_PATH, encoding="utf-8"))["vision_checks"]
+        check("销账：显式清除后记账里没有该模型", d_t not in rec3)
+        check("销账：清除不产生告警", calls["warn"] == n2)
+
+        # ── 状态文件坏了 / 不可写：静默退化，不能影响判据 ──────
+        with open(L._STATE_PATH, "w", encoding="utf-8") as fh:
+            fh.write("{ 这不是 json")
+        L._vision_missing_warned.clear()
+        L._state_cache = None
+        n3 = calls["warn"]
+        check("容错：状态文件损坏时判据仍正确", L.vision_capability(d_t) is False)
+        check("容错：状态文件损坏时照常提示一次", calls["warn"] == n3 + 1, f"warn={calls['warn']}")
+        check("容错：损坏文件被当空账本重建",
+              isinstance(json.load(open(L._STATE_PATH, encoding="utf-8")), dict))
+
+        ro = os.path.join(tmp, "ro")
+        os.makedirs(ro, exist_ok=True)
+        os.chmod(ro, 0o500)  # 只读目录：写状态必失败
+        L._STATE_PATH = os.path.join(ro, "state.json")
+        L._vision_missing_warned.clear()
+        L._state_cache = None
+        L._vision_probe_cache.clear()
+        n4 = calls["warn"]
+        try:
+            got = L.vision_capability(d_t)
+            check("容错：状态不可写时判据仍正确", got is False)
+            check("容错：状态不可写时照常提示一次", calls["warn"] == n4 + 1, f"warn={calls['warn']}")
+        finally:
+            os.chmod(ro, 0o700)
+        # 不存在的嵌套目录：makedirs 该救回来
+        L._STATE_PATH = os.path.join(tmp, "a", "b", "state.json")
+        L._vision_missing_warned.clear()
+        L._state_cache = None
+        L.vision_capability(d_t)
+        check("容错：状态目录不存在时自动创建", os.path.isfile(L._STATE_PATH))
     finally:
         L.logger.warning, L.metrics.emit, L.metrics.inc = real_warn, real_emit, real_inc
+        L._STATE_PATH = real_path
+        L._vision_missing_warned.clear()
+        L._state_cache = None
 
     print(f"\n通过 {sum(PASS)}/{len(PASS)}")
     return 0 if all(PASS) else 1

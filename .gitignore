@@ -62,3 +62,7 @@ notes/
 
 # App-specific
 *.log
+
+# 运行时状态（视觉探针记账等）
+.zhizi_state.json
+.zhizi_state.json.*.tmp
