@@ -1,7 +1,7 @@
 """角色注册表：二级制——一级用户，二级角色。
 
 每个角色有独立的 System Prompt（人物卡）与记忆命名空间；
-能力按角色启用：自视身份卡、观测笔记（主动记忆）等，未配置的自动关闭。
+能力按角色启用：自视身份卡、观测笔记（主动记忆）、按需联网搜索等，未配置的自动关闭。
 
 人物卡支持两种格式：
 - 纯文本 / Markdown：直接作为 System Prompt 内容；
@@ -19,12 +19,13 @@ class CharacterSpec:
     """单角色规格：prompt 文本 + 能力开关 + 命名空间标记。"""
 
     def __init__(self, name, prompt_path="", prompt_text="", visual_identity="",
-                 memory=True, default=False):
+                 memory=True, search=True, default=False):
         self.name = name
         self.prompt_path = prompt_path
         self.prompt_text = prompt_text
         self.visual_identity = visual_identity  # 自视身份卡路径；空=无（不自识别）
         self.memory = memory                    # 观测笔记（主动记忆）是否可用
+        self.search = search                    # 按需联网搜索是否可用
         self.default = default
 
     def to_dict(self):
@@ -33,6 +34,7 @@ class CharacterSpec:
             "prompt": self.prompt_path,
             "visual_identity": self.visual_identity,
             "memory": self.memory,
+            "search": self.search,
             "default": self.default,
         }
 
@@ -82,6 +84,7 @@ def load_characters(config):
                 prompt_text=load_prompt_text(prompt_path),
                 visual_identity=str(cfg.get("visual_identity") or "").strip(),
                 memory=bool(cfg.get("memory", True)),
+                search=bool(cfg.get("search", True)),
                 default=bool(cfg.get("default", False)),
             )
         if specs:
@@ -96,8 +99,9 @@ def load_characters(config):
             prompt_text=load_prompt_text(prompt_path),
             visual_identity=str(vis.get("card") or "").strip(),
             memory=True,
+            search=True,
             default=True,
-        )
+        ),
     }
 
 

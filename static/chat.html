@@ -59,6 +59,12 @@
   }
   .msg { display: flex; flex-direction: column; max-width: 78%; }
   .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .msg .who .ai-badge {
+    display: inline-block; vertical-align: top; margin-left: 4px;
+    padding: 0 5px; border-radius: 999px; font-size: 9px; line-height: 15px;
+    background: #222836; border: 1px solid var(--border);
+    color: var(--accent); transform: translateY(-3px);
+  }
   .msg .bubble {
     padding: 10px 14px; border-radius: 14px; white-space: pre-wrap;
     word-break: break-word; border: 1px solid var(--border);
@@ -503,7 +509,8 @@ function addMsg(role, text, actions, meta, noLog) {
   const who = role === 'user'
     ? userName
     : (charName || '智子');
-  let html = `<div class="who">${escapeHtml(who)}</div><div class="bubble"></div>`;
+  const aiTag = (role !== 'user' && !noLog) ? '<span class="ai-badge">AI</span>' : '';
+  let html = `<div class="who">${escapeHtml(who)}${aiTag}</div><div class="bubble"></div>`;
   el.innerHTML = html;
   el.querySelector('.bubble').textContent = text;
   if (actions && actions.length) {
@@ -553,7 +560,7 @@ function addMsgWithImages(role, imgs, text, actions) {
 function addTyping() {
   const el = document.createElement('div');
   el.className = 'msg bot';
-  el.innerHTML = `<div class="who">${escapeHtml(charName || '智子')}</div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>`;
+  el.innerHTML = `<div class="who">${escapeHtml(charName || '智子')}<span class="ai-badge">AI</span></div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>`;
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return el;

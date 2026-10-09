@@ -12,6 +12,7 @@ import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+from ..actions import split_reply
 from ..attachments import with_caption
 
 
@@ -132,8 +133,16 @@ class RecentMemory:
         
         for msg in reversed(messages):
             role = msg["role"]
+            content = msg["content"]
+            # 回灌给模型前剥掉自己旧回复里的括号动作，只留台词——
+            # 历史动作模板（连着几轮都"捏薯片袋"）会被当范式照抄，
+            # 形成自我强化的复读。落盘与展示层（get_messages /
+            # get_history）仍保留原文；用户消息里的动作是读者戏份，原样保留。
+            if role == "assistant":
+                plain, _ = split_reply(content)
+                content = plain or content
             # 带图的消息：补上图片内容说明，她才知道上一轮你给她看了什么
-            part = f"{role}: {with_caption(msg['content'], msg.get('caption'))}"
+            part = f"{role}: {with_caption(content, msg.get('caption'))}"
             
             if total_chars + len(part) > char_limit:
                 break

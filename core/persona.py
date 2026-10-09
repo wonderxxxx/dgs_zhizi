@@ -6,6 +6,7 @@ from collections import deque
 from datetime import datetime
 
 from . import attachments
+from . import websearch
 from .actions import split_reply
 from .llm import LLMClient
 from .metrics import logger, metrics
@@ -50,6 +51,17 @@ class Persona:
             # 自识别是可选项，加载失败不影响对话
             logger.warning("visual identity 装配失败: %s", exc)
             self.visual_identity = None
+        # 按需联网搜索：全局 web_search.enabled × 角色 search 开关，都开才装配。
+        # 白鸥这类角色 search=false → 无工具说明、无搜索执行，人格不受影响。
+        ws_cfg = config.get("web_search") or {}
+        char_search = True if character is None else bool(
+            getattr(character, "search", True))
+        self.websearch = None
+        self.search_prompt = ""
+        if bool(ws_cfg.get("enabled", True)) and char_search:
+            self.websearch = websearch.WebSearch(config)
+            self.search_prompt = websearch.tool_instructions()
+        self.last_searched = False  # 最近一轮是否真的发起过搜索（供壳子展示）
         self.history = []  # 短期记忆窗口
         self.last_attachments = {}  # 最近一轮的图片：{images:[{name,mime}], caption}
         self.recall_log = deque(maxlen=50)  # 每轮聊天的记忆召回 trace（供观测界面）
@@ -59,7 +71,14 @@ class Persona:
         with open(path, encoding="utf-8") as fh:
             return fh.read().strip()
 
-    def build_messages(self, user_input, self_context=""):
+    def build_messages(self, user_input, self_context="", search_context="",
+                       with_tools=True):
+        """拼完整消息序列。
+
+        search_context：本轮搜索结果块（两段式的第二遍才传；重建而非追加，
+        工具信封文本永远不进消息序列）。
+        with_tools：False = 撤掉工具说明（第二遍还硬要查时的最后兜底）。
+        """
         system_content = self.system_prompt
 
         # 自我识别上下文（图片中「可能是我」）并入 system，尊重「首条 system」约定
@@ -67,6 +86,7 @@ class Persona:
             system_content += "\n\n" + self_context
 
         # 使用五维记忆系统获取上下文（查询驱动召回，附带回溯 trace）
+        history = None
         if self.memory_manager:
             context, trace = self.memory_manager.get_context_traced(
                 user_id="default", max_tokens=2000, query=user_input
@@ -79,19 +99,23 @@ class Persona:
                 )
             self._record_recall(user_input, context, trace)
         else:
-            # 兼容旧版：使用简单历史（带图消息补上图片内容说明）
-            messages = [{"role": "system", "content": system_content}]
-            for m in self.history[-10:]:  # 只保留最近10条
-                messages.append({
-                    "role": m["role"],
-                    "content": attachments.with_caption(m.get("content", ""),
-                                                        m.get("caption")),
-                })
-            messages.append({"role": "user", "content": user_input})
-            return messages
+            history = self.history[-10:]  # 兼容旧版：简单历史（最近10条）
 
-        messages = [{"role": "system", "content": system_content},
-                    {"role": "user", "content": user_input}]
+        # 工具说明（每轮）与搜索结果（仅第二遍）都并入首条 system
+        if with_tools and self.search_prompt:
+            system_content += "\n\n" + self.search_prompt
+        if search_context:
+            system_content += "\n\n" + search_context
+
+        messages = [{"role": "system", "content": system_content}]
+        for m in history or []:
+            # 带图消息补上图片内容说明
+            messages.append({
+                "role": m["role"],
+                "content": attachments.with_caption(m.get("content", ""),
+                                                    m.get("caption")),
+            })
+        messages.append({"role": "user", "content": user_input})
         return messages
 
     def _record_recall(self, query, context, trace):
@@ -131,7 +155,57 @@ class Persona:
         cleared["images"] = attachments.clear(self.note_dir)  # 附件同属这轮记忆
         return cleared
 
-    def reply(self, user_input, images=None):
+    def _chat_once(self, messages, images=None):
+        """一次模型调用（仅在确有附件时传 images，兼容旧 fake/接口）。"""
+        return self.llm.chat(messages, images=images) if images \
+            else self.llm.chat(messages)
+
+    def _generate(self, user_input, images=None, self_context="",
+                  allow_search=True):
+        """生成一轮回复（含按需搜索的两段式）。返回 (reply_text, searched)。
+
+        第一遍：正常生成。没吐 <search> 信封 → 直接就是回复（绝大多数轮次
+        只多一次正则判断，零额外开销）。
+        吐了信封 → 执行搜索（额度内），**重建** messages（带结果块）再生成
+        第二遍——第一遍的信封文本被丢弃，最终回复、历史、记忆永远看不到
+        工具文本。第二遍还硬要查 → 撤掉工具说明再要一遍（封顶 3 次调用）。
+        """
+        self.last_searched = False
+        active = bool(allow_search and self.websearch)
+        reply = self._chat_once(
+            self.build_messages(user_input, self_context=self_context), images)
+        calls = websearch.parse_tool_calls(reply) if active else []
+        if not calls:
+            return websearch.strip_tool_calls(reply), False
+
+        # 执行额度内的搜索；注册表外的信封（模型瞎编的工具名）忽略
+        results, executed = [], 0
+        for call in calls:
+            if executed >= self.websearch.max_calls_per_turn:
+                break
+            if call["name"] not in websearch.TOOLS:
+                continue
+            executed += 1
+            results.extend(self.websearch.search(call["args"]))
+        if not executed:
+            return websearch.strip_tool_calls(reply), False
+        self.last_searched = True
+
+        ctx = websearch.render_results(results)
+        reply2 = self._chat_once(
+            self.build_messages(user_input, self_context=self_context,
+                                search_context=ctx),
+            images)
+        if websearch.parse_tool_calls(reply2):
+            # 额度已用完：带结果再问一遍，同时撤掉工具说明（没得查就只能答）
+            if not websearch.strip_tool_calls(reply2):
+                reply2 = self._chat_once(
+                    self.build_messages(user_input, self_context=self_context,
+                                        search_context=ctx, with_tools=False),
+                    images)
+        return websearch.strip_tool_calls(reply2), True
+
+    def reply(self, user_input, images=None, allow_search=True):
         t0 = time.perf_counter()
         metrics.inc("chat_turns")
         # 图片自识别：VLM 裸描述 → 属性匹配 → 置信度 ≥ 阈值才注入「可能是我」上下文
@@ -140,10 +214,9 @@ class Persona:
         if images and getattr(self, "visual_identity", None) is not None:
             self_context = self.visual_identity.analyze(images) or ""
             described = getattr(self.visual_identity, "last_described", None)
-        messages = self.build_messages(user_input, self_context=self_context)
-        # 仅在确有附件时传 images，兼容旧 fake/接口
-        reply_text = self.llm.chat(messages, images=images) if images \
-            else self.llm.chat(messages)
+        reply_text, _ = self._generate(user_input, images=images,
+                                       self_context=self_context,
+                                       allow_search=allow_search)
 
         # 图片：字节落盘（刷新后还在）+ 一句话说明（进记忆，她记得你给她看过什么）
         refs = attachments.save_images(self.note_dir, images) if images else []
@@ -239,15 +312,17 @@ class Persona:
             messages.append(out)
         return {"messages": messages, "persisted": persisted}
 
-    def reply_structured(self, user_input, images=None):
-        """壳子友好版：返回 {reply(正文), actions(动作列表), raw(原文)}。
+    def reply_structured(self, user_input, images=None, allow_search=True):
+        """壳子友好版：返回 {reply(正文), actions(动作列表), raw(原文), searched}。
 
         历史与笔记仍以原文(raw)记录，保证上下文连续；展示层按需取字段。
         带图的轮次另附 attachments（落盘引用 + 图片内容说明）。
+        searched：本轮是否真的发起了联网搜索（壳子可选择展示，默认不渲染）。
         """
-        raw = self.reply(user_input, images=images)
+        raw = self.reply(user_input, images=images, allow_search=allow_search)
         content, actions = split_reply(raw)
-        result = {"reply": content, "actions": actions, "raw": raw}
+        result = {"reply": content, "actions": actions, "raw": raw,
+                  "searched": bool(self.last_searched)}
         if self.last_attachments:
             result["attachments"] = self.last_attachments
         return result
@@ -364,13 +439,14 @@ class Persona:
                         "data": base64.b64encode(data).decode("ascii")})
         return out
 
-    def regenerate(self):
+    def regenerate(self, allow_search=True):
         """丢掉最后一条助手回复，就同一句话重新回答（换模型后重试用）。
 
         回滚范围：工作记忆 + 时间索引里旧回复那一条都清掉，不留「已被放弃的
         回答」继续参与 BM25 召回。事实/反思/人格不动——它们只从你的提问抽取，
         而提问本身没变，留着是对的；跨维度级联删除的代价远大于收益。
         图片沿用上一轮已落盘的引用（读回字节喂模型），不重复写盘、不重复描述。
+        按需搜索与 reply() 同一条路径（_generate 两段式）。
         """
         user_msg, asst_msg = self._last_turn()
         if user_msg is None:
@@ -387,9 +463,9 @@ class Persona:
             self_context = ""
             if images and self.visual_identity is not None:
                 self_context = self.visual_identity.analyze(images) or ""
-            messages = self.build_messages(user_input, self_context=self_context)
-            reply_text = self.llm.chat(messages, images=images) if images \
-                else self.llm.chat(messages)
+            reply_text, _ = self._generate(user_input, images=images,
+                                           self_context=self_context,
+                                           allow_search=allow_search)
         except Exception:
             self._restore_last_turn(user_msg, asst_msg)   # 失败就当没重试过
             raise
@@ -408,14 +484,15 @@ class Persona:
         )
         return reply_text
 
-    def regenerate_structured(self):
+    def regenerate_structured(self, allow_search=True):
         """regenerate() 的壳子友好版，字段同 reply_structured。
 
         不带 attachments：上一轮的图还在原消息上，别让壳子重复渲染。
         """
-        raw = self.regenerate()
+        raw = self.regenerate(allow_search=allow_search)
         content, actions = split_reply(raw)
-        return {"reply": content, "actions": actions, "raw": raw}
+        return {"reply": content, "actions": actions, "raw": raw,
+                "searched": bool(self.last_searched)}
 
     def get_memory_stats(self):
         """获取记忆统计信息。"""

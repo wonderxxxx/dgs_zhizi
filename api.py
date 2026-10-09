@@ -8,19 +8,23 @@
     uv run python api.py --port 8765
 
 接口：
-    POST /chat      {"message": "你好", "user_id": "小明", "character": "白鸥", "hide_actions": false}
+    POST /chat      {"message": "你好", "user_id": "小明", "character": "白鸥", "hide_actions": false,
+                     "allow_search": true}
                     → {"reply": "正文", "actions": ["动作1"], "raw": "原文",
+                       "searched": false,
                        "user_id": "小明", "character": "白鸥"}
                     character 缺省 = 默认角色（config.characters 的 default）。
                     一级用户 / 二级角色：不同角色独立人格与记忆命名空间。
-    GET  /characters → {"default": "千夜智子", "characters": [{name, prompt, visual_identity, memory, default}]}
+                    allow_search 缺省 true：本轮是否允许按需联网搜索
+                    （searched = 这轮是否真的查了；壳子可据此展示提示）。
+    GET  /characters → {"default": "千夜智子", "characters": [{name, prompt, visual_identity, memory, search, default}]}
     GET  /users      → {"default": "default", "users": ["default", "alice", ...]}
                     已知 user_id 清单（notes 落盘目录 ∪ 内存活跃键），供壳子做用户下拉框
     GET  /history    → {"user_id","character","persisted","messages":[{role,content,actions,time}]}
                     该 user_id × character 的聊天记录（正序），供壳子打开会话时回填
                     带图消息附 images:[{name,mime}]（走 GET /image）与 caption（图片内容说明）
     GET  /image      → ?user_id=&character=&name= 回读历史里的原图字节（鉴权同 /history）
-    GET  /health    → {"status": "ok", "model": "...", "vision": bool, "users": N, "notes": M}
+    GET  /health    → {"status": "ok", "model": "...", "vision": bool, "search": bool, "users": N, "notes": M}
     GET  /model     → 当前模型 + 可切换模型清单（含是否多模态）
     POST /model     → {"model": "<路径/名称>"} 切换现行模型
     GET  /metrics   → 进程内指标（计数器/延迟/事件）
@@ -158,11 +162,13 @@ def make_handler(users, api_key="", dashboard_enabled=True):
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path == "/health":
-                llm = users.get("default").llm
+                persona = users.get("default")
+                llm = persona.llm
                 self._send(200, {
                     "status": "ok",
                     "model": llm_mod.get_active_model() or llm.model,
                     "vision": llm_mod.active_vision(),
+                    "search": persona.websearch is not None,
                     "users": len(users),
                     "notes": users.total_notes(),
                 })
@@ -385,9 +391,11 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                 persona = entry["persona"]
                 images = []
                 with entry["lock"]:  # 同一键内串行，避免历史/笔记写竞争
+                    allow_search = bool(body.get("allow_search", True))
                     if path == "/regenerate":
                         # 换模型后就同一句话再要一个回答（丢掉旧回复）
-                        result = persona.regenerate_structured()
+                        result = persona.regenerate_structured(
+                            allow_search=allow_search)
                     else:
                         message = str(body.get("message", "")).strip()
                         images = self._parse_attachments(body)
@@ -395,7 +403,8 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                             metrics.inc("chat_bad_requests")
                             self._send(400, {"error": "message 不能为空"})
                             return
-                        result = persona.reply_structured(message, images=images)
+                        result = persona.reply_structured(
+                            message, images=images, allow_search=allow_search)
                 # reply 恒为正文；hide_actions=true 时不返回动作列表（省流量）
                 if body.get("hide_actions", False):
                     result.pop("actions", None)

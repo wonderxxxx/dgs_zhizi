@@ -18,6 +18,7 @@ zhizi/
 │   ├── characters.py      # 角色注册表：prompt 读取（含字面量包装）+ 能力开关
 │   ├── visual_identity.py # 自视身份层：VLM 裸描述 → 属性匹配 → 「图片中可能是我」
 │   ├── actions.py         # 动作/神情描写剥离（按需隐藏）
+│   ├── websearch.py       # 按需联网搜索执行层：文本协议信封 + Bing HTML（免 key）
 │   ├── users.py           # 用户级 + 角色级隔离：每 (user, char) 独立 Persona + 并发锁
 │   └── router.py          # 路由层（后置占位：小模型语域/插件判断）
 ├── visual/                # 自视身份卡 + 参考图（模型自识别的视觉基准）
@@ -124,6 +125,13 @@ curl -X POST http://127.0.0.1:8765/chat \
   -d '{"message": "哥哥回来了吗", "user_id": "alice", "hide_actions": true}'
 # → {"reply": "正文", "raw": "原文", "user_id": "alice"}
 
+# 按需联网搜索：模型觉得信息有时效性（新闻/比分/价格/近况）才自己发起，
+# 结果只喂回给模型——对她、对界面都不可见。searched 字段壳子可选择展示。
+curl -X POST http://127.0.0.1:8765/chat \
+  -d '{"message": "今天有什么新闻", "user_id": "alice", "allow_search": false}'
+# → {"reply": "…", "searched": false, …}   allow_search 缺省 true；
+#   searched = 这轮是否真的查了。执行层：Bing HTML（免 key 零依赖）+ 进程内缓存
+
 # 重新生成：换模型后就同一句话再要一个回答（鉴权同 /chat）
 # 丢掉工作记忆里那条旧回复再重问，历史不会多出一条重复提问；
 # 带图轮次的图从落盘读回再喂给模型，引用与说明原样保留。
@@ -135,7 +143,8 @@ curl -X POST http://127.0.0.1:8765/regenerate \
 # 聊天页里她最后一条回答下方有「重新生成」按钮。
 
 curl http://127.0.0.1:8765/health
-# → {"status": "ok", "model": "...", "users": N, "notes": M}
+# → {"status": "ok", "model": "...", "search": true, "users": N, "notes": M}
+# search = 默认角色是否装配了按需联网搜索（web_search.enabled × characters.<角色>.search）
 
 # 自视身份卡（模型自识别基准，GET 观测用）
 curl http://127.0.0.1:8765/identity
@@ -177,9 +186,9 @@ curl -X POST http://127.0.0.1:8765/memory/clear \
 - **角色级隔离（二级）**：`character` 是第二维（缺省默认角色）。每个角色独立 System Prompt
   与记忆命名空间——默认角色沿用 `notes/<user_id>/` 一级目录，其余角色落盘到
   `notes/<user_id>/<角色名>/`，互不串味。角色能力可开关（`config.yaml` 的 `characters` 段）：
-  `memory` 关掉即不主动观测用户（观测笔记是智子的专属能力），`visual_identity` 留空即无
-  自视身份卡（白鸥如此）。人物卡支持纯文本/Markdown 或 `SYS_PROMPT = r'''...'''` 包装
-  （无需改卡，零修改接入）。
+  `memory` 关掉即不主动观测用户（观测笔记是智子的专属能力），`search` 关掉即无按需
+  联网搜索，`visual_identity` 留空即无自视身份卡（白鸥三者皆无）。人物卡支持纯文本/
+  Markdown 或 `SYS_PROMPT = r'''...'''` 包装（无需改卡，零修改接入）。
 - **鉴权（可选）**：`config.yaml` 的 `server.api_key` 非空时，`/chat` 与
   `/regenerate` 需带请求头 `Authorization: Bearer <api_key>`（`/health` 放行，方便探活）。
   `/history`（聊天记录是私事）与 `/memory/clear` 同样要求鉴权。
@@ -204,6 +213,15 @@ curl -X POST http://127.0.0.1:8765/memory/clear \
   超阈值才注入「图片中可能是我」的 system 上下文，让智子按性格自然接话；
   有参考图时叠加一张「视觉比对」加权融合（0.6 属性 + 0.4 比对）。粒度见 /metrics 的
   identity_* 事件；任何一步失败都静默降级，不拖垮对话（config: visual_identity 段）。
+- **按需联网搜索**：默认 provider 是本地 MLX（无 function calling），所以走文本协议——
+  system 注入工具说明，模型觉得信息有时效性才输出 `<search>查询</search>`，系统代查
+  （Bing HTML，免 key 零依赖、进程内 LRU 缓存、超时可配），把结果以「你本来就知道的」
+  口吻喂回首条 system，**重建** messages 再生成第二遍。工具信封只活在两遍之间：最终
+  回复、历史、观测笔记永远看不到标签（人设红线：她不承认自己是 AI，搜索过程对她、对
+  用户都不可见）。护栏：每轮限 1 次、封顶 3 次模型调用、异常静默降级按已有知识回答。
+  三层开关：全局 `web_search.enabled` × 角色 `characters.<角色>.search` × 请求
+  `allow_search`；`/health` 的 `search` 位与 `web_search_*` 指标可观测。
+  （执行层按工具注册表隔离，将来接 MCP = 注册表挂执行器，触发/护栏/注入层复用。）
 - **路由层后置**：默认关闭，小模型语域/插件判断后续接入；当前人格切换完全由主模型
   按 System Prompt 自主执行，不注入外部指令。
 - **红线已在 System Prompt 内置**：模糊边界（不暴露技术本质）、呈现克制（谜团/渴望
