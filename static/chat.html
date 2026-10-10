@@ -53,9 +53,30 @@
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px;
     background: #222836; border: 1px solid var(--border); font-size: 11px; color: var(--muted); }
 
+  #chatWrap {
+    position: relative; flex: 1; min-height: 0;
+    max-width: 860px; width: 100%; margin: 0 auto;
+    display: flex; flex-direction: column;
+  }
   #messages {
-    flex: 1; overflow-y: auto; padding: 20px; max-width: 860px;
-    width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 14px;
+    flex: 1; overflow-y: auto; padding: 20px;
+    width: 100%; display: flex; flex-direction: column; gap: 14px;
+  }
+  /* 系统横幅（切模型等瞬时提示）：消息区顶部居中的浮动小卡，不进消息流、不落历史 */
+  .banner {
+    position: absolute; top: 14px; left: 50%; z-index: 20;
+    max-width: calc(100% - 32px);
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 9px 16px; font-size: 12.5px; color: var(--accent);
+    background: #1b2333; border: 1px solid var(--accent); border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
+    transform: translate(-50%, -140%); opacity: 0; visibility: hidden;
+    transition: transform .28s ease, opacity .28s ease, visibility 0s linear .28s;
+    cursor: pointer; user-select: none; pointer-events: none;
+  }
+  .banner.show {
+    transform: translate(-50%, 0); opacity: 1; visibility: visible;
+    transition: transform .28s ease, opacity .28s ease, visibility 0s linear 0s;
   }
   .msg { display: flex; flex-direction: column; max-width: 78%; }
   .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
@@ -65,6 +86,18 @@
     background: #222836; border: 1px solid var(--border);
     color: var(--accent); transform: translateY(-3px);
   }
+  .msg .who .copy {
+    margin-left: 6px; padding: 0 5px; font-size: 10px; line-height: 15px;
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    color: var(--muted); cursor: pointer; opacity: 0; transition: opacity .15s;
+  }
+  .msg:hover .who .copy { opacity: .85; }
+  .msg .who .copy:hover { color: var(--accent); border-color: var(--border); }
+  .msg .who .copy.done { color: var(--ok); opacity: 1; }
+  @media (hover: none) { .msg .who .copy { opacity: .6; } }  /* 触屏无 hover：常显 */
+  /* 一条回复拆成多个气泡：续段不重复名字/徽标，段与段略收紧成一组 */
+  .msg.cont .who { display: none; }
+  .msg.cont { margin-top: -4px; }
   .msg .bubble {
     padding: 10px 14px; border-radius: 14px; white-space: pre-wrap;
     word-break: break-word; border: 1px solid var(--border);
@@ -76,7 +109,10 @@
   .msg .actions {
     margin-top: 6px; font-size: 12px; color: var(--muted); font-style: italic;
     white-space: pre-wrap; line-height: 1.5;
+    display: none;
   }
+  .msg:hover .actions { display: block; }
+  @media (hover: none) { .msg .actions { display: block; } }  /* 触屏无 hover：常显 */
   .msg .caption {
     margin-top: 6px; font-size: 11px; color: var(--muted);
     border-left: 2px solid var(--border); padding-left: 8px;
@@ -195,7 +231,6 @@
   <div class="controls">
     <label>用户 <select id="userId" title="切换用户（一级隔离：会话与记忆按 user_id 分开）"></select></label>
     <label>角色 <select id="charSelect" title="切换角色（一级用户 / 二级角色，记忆互相隔离）"></select></label>
-    <label><input type="checkbox" id="hideActions"/> 隐藏动作</label>
     <label>Key <input type="password" id="apiKey" placeholder="无则留空" style="width:90px"/></label>
     <select id="modelSelect" title="切换模型（mlx 场景释放旧引擎、惰性重载）"></select>
     <span class="vision-pill" id="visionPill">…</span>
@@ -205,8 +240,11 @@
   </div>
 </header>
 
-<div id="messages">
-  <div class="empty" id="empty">打个招呼吧 —— 她记得这个 user_id + 角色 下的所有过往。</div>
+<div id="chatWrap">
+  <div id="banner" class="banner" role="status" title="点击关闭"></div>
+  <div id="messages">
+    <div class="empty" id="empty">打个招呼吧 —— 她记得这个 user_id + 角色 下的所有过往。</div>
+  </div>
 </div>
 
 <footer>
@@ -299,6 +337,80 @@ function stampOf(iso) {
 
 function escapeHtml(s) {
   return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+// 一键复制：优先异步剪贴板（安全上下文）；局域网 http 下无 clipboard API，
+// 退回隐藏 textarea + execCommand（旧办法，仍被主流浏览器支持）。
+async function copyText(btn, text) {
+  if (!text) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      if (!ok) throw new Error('copy rejected');
+    }
+    btn.textContent = '已复制';
+    btn.classList.add('done');
+    setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('done'); }, 1200);
+  } catch (_) {
+    btn.textContent = '复制失败';
+    setTimeout(() => { btn.textContent = '复制'; }, 1200);
+  }
+}
+
+// ---------- 一条回复拆成多个气泡（模拟她连续发好几条） ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let grpSeq = 0;          // 分段组号：同组 = 同一条回复（重生成时整组替换）
+let renderGen = 0;       // 清屏/重拉会清空列表：分段动画发现代数变了就停手
+const SEG_DELAY = 500;   // 段间节奏（ms），中间垫一段「正在输入」
+const SEG_MAX = 5;       // 拆分上限：比这更碎就并回尾巴，避免刷屏
+
+// 按空行拆段；段内的单个换行不拆（那是排版，不是新气泡）
+function splitBotParts(text) {
+  const parts = (text || '').split(/\n[ \t]*\n+/)
+    .map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return [text || ''];
+  if (parts.length > SEG_MAX) {
+    return [...parts.slice(0, SEG_MAX - 1),
+            parts.slice(SEG_MAX - 1).join('\n\n')];
+  }
+  return parts;
+}
+
+// AI 回复统一从这里进：按空行拆成多段气泡（animate=true 时逐段出现，
+// 段间垫打字提示；历史回填 animate=false 同步一次画完）。
+// chatLog 只记一条完整回复——导出与预览按整条走，跟拆不拆无关。
+async function addBotReply(text, actions, meta, animate) {
+  meta = meta || {};
+  const parts = splitBotParts(text);
+  const full = [text, ...(actions || [])].filter(Boolean).join('\n');
+  const gen = renderGen;
+  chatLog.push({role: 'bot', content: text, actions: actions || [],
+                ts: meta.ts || '', images: meta.images || [],
+                caption: meta.caption || ''});
+  const grp = parts.length > 1 ? 'g' + (++grpSeq) : '';
+  for (let i = 0; i < parts.length; i++) {
+    if (gen !== renderGen) return;   // 期间被清屏/重拉：别再往新列表里塞
+    if (i > 0 && animate) {
+      const t = addTyping();   // 段间的「她正在打字」
+      await sleep(SEG_DELAY);
+      t.remove();
+    }
+    addMsg('bot', parts[i], i === parts.length - 1 ? actions : null, {
+      ts: meta.ts,
+      images: i === 0 ? meta.images : undefined,
+      caption: i === 0 ? meta.caption : undefined,
+      copy: full, skipLog: true, grp,
+      hideWho: i > 0, hideTime: i < parts.length - 1,
+    });
+  }
 }
 
 function dataUrlToParts(url) {
@@ -496,23 +608,42 @@ function appendCaption(el, caption) {
 
 function addMsg(role, text, actions, meta, noLog) {
   // meta: {ts, images:[{name,mime}], caption}——历史回填用（服务端给的原图 + 内容说明）
+  //       分段气泡另用 {skipLog, grp, copy, hideWho, hideTime}（见 addBotReply）
   meta = meta || {};
   $('empty')?.remove();
-  // 错误提示与界面提示不进导出；noLog 用于「已切换到模型」这类非聊天内容
-  if (!noLog && role !== 'error') {
-    chatLog.push({role, content: text, actions: actions || [], ts: meta.ts || '',
+  // 历史回填的助手消息 role 是 "assistant"，本轮新回复是 "bot"：统一成 bot，
+  // 否则 .msg.assistant 没有配套样式，气泡与页面其余消息不一致。
+  const cls = role === 'user' ? 'user' : (role === 'error' ? 'error' : 'bot');
+  // 错误提示与界面提示不进导出；noLog 是系统便签通道（不进聊天/导出，
+  // 切模型提示已改走顶部横幅，此通道暂无调用方，保留）；
+  // skipLog：分段气泡由 addBotReply 记一条完整回复，段本身不单独入账
+  if (!noLog && cls !== 'error' && !meta.skipLog) {
+    chatLog.push({role: cls === 'user' ? 'user' : 'bot', content: text,
+                  actions: actions || [], ts: meta.ts || '',
                   images: meta.images || [], caption: meta.caption || ''});
   }
   const el = document.createElement('div');
-  el.className = 'msg ' + role;
+  el.className = 'msg ' + cls;
+  if (meta.grp) el.dataset.grp = meta.grp;   // 同一条回复的分段（重生成整组替换）
+  if (meta.hideWho) el.classList.add('cont');
   if (noLog) el.classList.add('sys');   // 系统便签（切模型提示）：不算她的回答
-  const who = role === 'user'
+  const who = cls === 'user'
     ? userName
     : (charName || '智子');
-  const aiTag = (role !== 'user' && !noLog) ? '<span class="ai-badge">AI</span>' : '';
-  let html = `<div class="who">${escapeHtml(who)}${aiTag}</div><div class="bubble"></div>`;
+  const aiTag = (cls === 'bot' && !noLog) ? '<span class="ai-badge">AI</span>' : '';
+  // 复制（正文 + 动作神态），与导出用的是同一份内容；分段时第一段复制整条
+  const copyable = !noLog && cls !== 'error' && !meta.hideWho;
+  const copyVal = meta.copy || [text, ...(actions || [])].filter(Boolean).join('\n');
+  const copyBtn = copyable
+    ? '<button class="copy" type="button" title="复制这条消息">复制</button>' : '';
+  const nameHtml = meta.hideWho ? '' : escapeHtml(who) + aiTag;
+  let html = `<div class="who">${nameHtml}${copyBtn}</div><div class="bubble"></div>`;
   el.innerHTML = html;
   el.querySelector('.bubble').textContent = text;
+  if (copyable) {
+    el.querySelector('.copy').addEventListener('click',
+      (e) => copyText(e.currentTarget, copyVal));
+  }
   if (actions && actions.length) {
     const a = document.createElement('div');
     a.className = 'actions';
@@ -533,10 +664,12 @@ function addMsg(role, text, actions, meta, noLog) {
     });
     bubble.insertBefore(frag, bubble.firstChild);
   }
-  const t = document.createElement('div');
-  t.className = 'time';
-  t.textContent = meta.ts ? stampOf(meta.ts) : now();
-  el.appendChild(t);
+  if (!meta.hideTime) {   // 分段时时间只挂最后一条，不逐段重复
+    const t = document.createElement('div');
+    t.className = 'time';
+    t.textContent = meta.ts ? stampOf(meta.ts) : now();
+    el.appendChild(t);
+  }
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   refreshRegen();
@@ -574,6 +707,21 @@ function addNote(text) {
   messagesEl.appendChild(el);
   return el;
 }
+
+// ---------- 系统横幅：瞬时提示（切模型等），不进消息流 ----------
+// 连续切换只留最新一条，计时重置；点击可提前关闭。
+let bannerTimer = null;
+function showBanner(text) {
+  const b = $('banner');
+  b.textContent = text;
+  b.classList.add('show');
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => b.classList.remove('show'), 3500);
+}
+$('banner').addEventListener('click', () => {
+  clearTimeout(bannerTimer);
+  $('banner').classList.remove('show');
+});
 
 function setBusy(v) {
   busy = v;
@@ -639,6 +787,7 @@ function currentKeyIs(key) { return histKeyOf() === key; }
 function renderHistory(d) {
   const msgs = Array.isArray(d.messages) ? d.messages : [];
   releaseImages();
+  renderGen++;          // 换列表了：在途的分段动画全部作废
   messagesEl.innerHTML = '';
   chatLog.length = 0;   // 与 DOM 一起重置：换用户/换角色/重拉时别把旧记录留在导出里
   $('histPill').textContent = msgs.length ? `历史 ${msgs.length}` : '无历史';
@@ -648,8 +797,12 @@ function renderHistory(d) {
                   : '该角色不启用观测笔记（记录不落盘，仅当前进程有效）。'}</div>`;
     return;
   }
-  msgs.forEach((m) => addMsg(m.role, m.content, m.actions,
-    {ts: m.time, images: m.images, caption: m.caption}));
+  msgs.forEach((m) => {
+    const meta = {ts: m.time, images: m.images, caption: m.caption};
+    // 她的消息同样按空行拆段（同步一次画完，历史不逐段动画）
+    if (m.role === 'assistant') addBotReply(m.content, m.actions, meta, false);
+    else addMsg(m.role, m.content, m.actions, meta);
+  });
   if (!d.persisted) {
     addNote('该角色未启用观测笔记：历史只在当前进程内，重启即失。');
   }
@@ -682,13 +835,22 @@ function refreshRegen() {
   answer.appendChild(btn);
 }
 
-function swapLastAnswer(data) {
+async function swapLastAnswer(data) {
   const el = lastAnswerEl();
-  if (el) el.remove();
+  if (el) {
+    const grp = el.dataset.grp;
+    if (grp) {
+      // 分段回复：同组气泡一次全撤，不能只删最后那段
+      messagesEl.querySelectorAll(`.msg[data-grp="${grp}"]`)
+        .forEach((n) => n.remove());
+    } else {
+      el.remove();
+    }
+  }
   for (let i = chatLog.length - 1; i >= 0; i--) {
     if (chatLog[i].role === 'bot') { chatLog.splice(i, 1); break; }
   }
-  addMsg('bot', data.reply || '(空回复)', data.actions);
+  await addBotReply(data.reply || '(空回复)', data.actions, {}, true);
 }
 
 async function regenerate() {
@@ -700,13 +862,12 @@ async function regenerate() {
     const r = await fetch('/regenerate', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({user_id: userName, character: charName || undefined,
-                            hide_actions: $('hideActions').checked}),
+      body: JSON.stringify({user_id: userName, character: charName || undefined}),
     });
     const data = await r.json();
     typing.remove(); typing = null;
     if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-    swapLastAnswer(data);
+    await swapLastAnswer(data);
   } catch (e) {
     if (typing) typing.remove();
     addMsg('error', '重新生成失败：' + (e.message || e));  // 旧回答原样留着
@@ -749,7 +910,6 @@ async function send() {
       message: text,
       user_id: userName,
       character: charName || undefined,
-      hide_actions: $('hideActions').checked,
     };
     if (imgs.length && vision) payload.attachments = sendImgs;
     const r = await fetch('/chat', {
@@ -770,7 +930,7 @@ async function send() {
       const rec = chatLog[chatLog.length - 1];
       if (rec) rec.caption = data.attachments.caption;
     }
-    addMsg('bot', data.reply || '(空回复)', data.actions);
+    await addBotReply(data.reply || '(空回复)', data.actions, {}, true);
   } catch (e) {
     if (typing) typing.remove();
     addMsg('error', '出错了：' + (e.message || e));
@@ -790,6 +950,7 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
 });
 $('clear').addEventListener('click', () => {
+  renderGen++;              // 正在分段动画的回答停手，别再往清空的列表里塞
   releaseImages();
   messagesEl.innerHTML = '<div class="empty" id="empty">已清屏（服务端记忆保留）。</div>';
   $('histPill').textContent = '已清屏';
@@ -877,7 +1038,7 @@ function roundRectPath(ctx, x, y, w, h, r, tail) {
 }
 
 // 量一条消息的排版，返回 {h, paint(ctx, y0)}
-function layoutMsg(ctx, m, imgs, T, hideActions) {
+function layoutMsg(ctx, m, imgs, T) {
   const isUser = m.role === 'user';
   const colW = EXP_W - EXP_PAD * 2;
   const maxW = colW * 0.78;          // 同 .msg { max-width: 78% }（只是上限）
@@ -927,8 +1088,8 @@ function layoutMsg(ctx, m, imgs, T, hideActions) {
                                     font: fontOf(14), color: T.text, align: 'left'}));
   y += bubH;
 
-  // 动作（斜体，可被「隐藏动作」勾掉）
-  if (!hideActions && m.actions && m.actions.length) {
+  // 动作（斜体）
+  if (m.actions && m.actions.length) {
     const t = m.actions.join('\n');
     ctx.font = fontOf(12, null, true);
     const ls = wrapText(ctx, t, maxW);
@@ -1119,7 +1280,6 @@ function syncExpFoot() {
   if (!expSel.size) { est.textContent = ''; est.classList.remove('bad'); return; }
   const picked = expList.filter((_, i) => expSel.has(i));
   const ctx = measureCtx();
-  const hideActions = $('hideActions').checked;
   const T = expTheme();
   // 预估高度：图片按 200px 高的占位算（真图还没载下来）
   const place = new Map();
@@ -1128,7 +1288,7 @@ function syncExpFoot() {
     if (n) place.set(i, Array.from({length: n}, () => ({width: 320, height: 200})));
   });
   const H = EXP_HEAD + picked.reduce((a, m, i) =>
-    a + layoutMsg(ctx, m, place.get(i) || [], T, hideActions).h, 0) + EXP_PAD;
+    a + layoutMsg(ctx, m, place.get(i) || [], T).h, 0) + EXP_PAD;
   const p = planExport(H, picked.length);
   est.classList.toggle('bad', !p.fits);
   // 缩放比是浮点，展示时压到 2 位，免得出现 1.2267357882376984 这种
@@ -1218,7 +1378,6 @@ async function exportSelected() {
   const picked = expList.filter((_, i) => expSel.has(i));
   if (!picked.length) { addNote('没有勾选任何内容。'); return; }
   const T = expTheme();
-  const hideActions = $('hideActions').checked;
   btn.disabled = true;
   btn.textContent = '导出中…';
   $('expGo').disabled = true;
@@ -1228,7 +1387,7 @@ async function exportSelected() {
 
     // 先排版量高（同一套度量上下文，宽度固定）
     const ctx = measureCtx();
-    const layouts = picked.map((m, i) => layoutMsg(ctx, m, imgs.get(i) || [], T, hideActions));
+    const layouts = picked.map((m, i) => layoutMsg(ctx, m, imgs.get(i) || [], T));
     const H = EXP_HEAD + layouts.reduce((a, L) => a + L.h, 0) + EXP_PAD;
 
     // 单张长图：整段内容进一张画布，清晰度尽量高，实在装不下才降
@@ -1328,7 +1487,7 @@ $('modelSelect').addEventListener('change', async (e) => {
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    addMsg('bot', `（已切换到模型 ${d.model.split('/').pop()}${d.vision ? ' · 多模态' : ' · 仅文本'}，重新加载中…）`, null, null, true);
+    showBanner(`已切换到模型 ${d.model.split('/').pop()}${d.vision ? ' · 多模态' : ' · 仅文本'}，重新加载中…`);
     sel.dataset.current = d.model || '';
     health();
   } catch (err) {
