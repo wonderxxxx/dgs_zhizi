@@ -24,9 +24,13 @@
                     该 user_id × character 的聊天记录（正序），供壳子打开会话时回填
                     带图消息附 images:[{name,mime}]（走 GET /image）与 caption（图片内容说明）
     GET  /image      → ?user_id=&character=&name= 回读历史里的原图字节（鉴权同 /history）
-    GET  /health    → {"status": "ok", "model": "...", "vision": bool, "search": bool, "users": N, "notes": M}
-    GET  /model     → 当前模型 + 可切换模型清单（含是否多模态）
-    POST /model     → {"model": "<路径/名称>"} 切换现行模型
+    GET  /health    → {"status": "ok", "model": "...", "vision": bool,
+                       "load_state": "loaded|loading|unloaded|error|remote", "load_error": str|null,
+                       "search": bool, "users": N, "notes": M}
+    GET  /model     → 当前模型 + 可切换模型清单（含是否多模态）+ 现行模型 load_state
+    POST /model     → {"model": "<路径/名称>"} 切换现行模型并后台预热，
+                       返回 {"status","model","vision","load_state","load_error"}
+                       （前端轮询 GET /model 的 load_state 可得加载完成通知）
     GET  /metrics   → 进程内指标（计数器/延迟/事件）
     GET  /events    → SSE 实时事件流（监控用）
     GET  /chat      → 聊天单页（static/chat.html）
@@ -164,10 +168,13 @@ def make_handler(users, api_key="", dashboard_enabled=True):
             if path == "/health":
                 persona = users.get("default")
                 llm = persona.llm
+                load = llm_mod.model_load_state()
                 self._send(200, {
                     "status": "ok",
                     "model": llm_mod.get_active_model() or llm.model,
                     "vision": llm_mod.active_vision(),
+                    "load_state": load.get("state"),
+                    "load_error": load.get("error"),
                     "search": persona.websearch is not None,
                     "users": len(users),
                     "notes": users.total_notes(),
@@ -177,6 +184,9 @@ def make_handler(users, api_key="", dashboard_enabled=True):
             elif path == "/metrics":
                 snap = metrics.snapshot()
                 snap["model"] = llm_mod.get_active_model() or users.get("default").llm.model
+                load = llm_mod.model_load_state()
+                snap["load_state"] = load.get("state")
+                snap["load_error"] = load.get("error")
                 snap["users"] = len(users)
                 self._send(200, snap)
             elif path == "/events":
@@ -331,9 +341,12 @@ def make_handler(users, api_key="", dashboard_enabled=True):
         def _model_list(self):
             """GET /model：现行模型 + 可切换的模型清单（含各自是否多模态）。"""
             reg = llm_mod.get_model_registry()
+            load = llm_mod.model_load_state()
             self._send(200, {
                 "current": llm_mod.get_active_model(),
                 "vision": llm_mod.active_vision(),
+                "load_state": load.get("state"),
+                "load_error": load.get("error"),
                 "models": [
                     {"path": m, "name": llm_mod.model_label(m),
                      "vision": llm_mod.vision_capability(m, "auto")}
@@ -350,9 +363,19 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                 target = llm_mod.resolve_model_switch(str(body.get("model", "")))
                 llm_mod.set_active_model(target)
                 vision = llm_mod.active_vision()
-                metrics.emit("model_switch", model=target, vision=vision)
-                logger.info("model switched to=%s vision=%s", target, vision)
-                self._send(200, {"status": "ok", "model": target, "vision": vision})
+                # 主动后台预热，免去「发第一条消息才加载」的长时间无反馈
+                try:
+                    setting = users.get("default").llm.multimodal_setting
+                except Exception:
+                    setting = "auto"
+                load = llm_mod.preload_active(setting)
+                metrics.emit("model_switch", model=target, vision=vision,
+                             load_state=load.get("state"))
+                logger.info("model switched to=%s vision=%s load=%s",
+                            target, vision, load.get("state"))
+                self._send(200, {"status": "ok", "model": target, "vision": vision,
+                                 "load_state": load.get("state"),
+                                 "load_error": load.get("error")})
             except ValueError as exc:
                 metrics.inc("model_switch_errors")
                 self._send(400, {"error": str(exc)})
@@ -558,7 +581,7 @@ def main():
     print(f"  GET  /health    健康检查")
     print(f"  GET  /identity   自视身份卡 + 自识别开关状态")
     print(f"  GET  /model     模型切换器：现行模型 + 可切换清单")
-    print(f"  POST /model     JSON('model': 路径) → 切换现行模型（mlx 释放旧引擎惰性重载）")
+    print(f"  POST /model     JSON('model': 路径) → 切换现行模型（后台预热，load_state 可查进度）")
     print(f"  GET  /metrics   指标 JSON")
     print(f"  GET  /events    SSE 事件流")
     print(f"  GET  /chat     聊天页面")

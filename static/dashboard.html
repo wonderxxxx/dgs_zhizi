@@ -172,7 +172,9 @@ async function refresh() {
     const s = await r.json();
     liveEl.className = 'dot on';
     renderSnapshot(s);
-    if (s.model) document.getElementById('model').textContent = s.model;
+    const m = document.getElementById('model');
+    if (s.model) m.textContent = s.model + (s.load_state ? ' · ' + s.load_state : '');
+    m.title = s.load_error ? ('加载失败：' + s.load_error) : '当前模型加载状态';
     document.getElementById('clock').textContent = new Date().toLocaleTimeString();
   } catch (e) {
     liveEl.className = 'dot off';

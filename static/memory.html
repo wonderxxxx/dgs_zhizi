@@ -536,7 +536,8 @@ async function health() {
     const r = await fetch('/health');
     const d = await r.json();
     liveEl.className = 'dot on';
-    if (d.model) $('model').textContent = d.model;
+    if (d.model) $('model').textContent = d.model + (d.load_state ? ' · ' + d.load_state : '');
+    $('model').title = d.load_error ? ('加载失败：' + d.load_error) : '当前模型加载状态';
   } catch (_) { liveEl.className = 'dot off'; }
 }
 

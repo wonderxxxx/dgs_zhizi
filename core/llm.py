@@ -39,7 +39,9 @@ class _MlxExecutor:
         self._q: queue.Queue = queue.Queue()
         self._engines = {}  # model_path -> ("lm"|"vlm", model, processor)
         self._no_vision = set()  # 声称多模态但视觉塔缺权重的模型
+        self._states = {}  # model_path -> {"state", "error", "ts"}：加载状态供前端展示
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="mlx-infer", daemon=True)
         self._thread.start()
@@ -78,13 +80,44 @@ class _MlxExecutor:
         if self._stream is not None:
             mx.set_default_stream(self._stream)
 
+    def _set_state(self, model_path, state, error=None):
+        with self._state_lock:
+            self._states[model_path] = {
+                "state": state,
+                "error": error,
+                "ts": time.time(),
+            }
+
+    def status(self, model_path) -> dict:
+        """模型加载状态：unloaded / loading / loaded / error。"""
+        with self._state_lock:
+            rec = self._states.get(model_path)
+            if rec is not None:
+                return dict(rec)
+        # 已加载但没记过状态（旧路径）：按 loaded 兜底
+        if model_path in self._engines:
+            return {"state": "loaded", "error": None, "ts": None}
+        return {"state": "unloaded", "error": None, "ts": None}
+
+    def preload(self, model_path, multimodal=False):
+        """后台异步加载（切换模型后主动预热），状态经 status() 查询。"""
+        def _run():
+            try:
+                self.load(model_path, multimodal=multimodal)
+            except Exception:
+                pass  # 失败已记入 status(error)，此处不再抛
+
+        threading.Thread(target=_run, name="mlx-preload", daemon=True).start()
+
     def load(self, model_path, multimodal=False):
         def _do():
             with self._lock:
                 if model_path in self._engines:
+                    self._set_state(model_path, "loaded")
                     return self._engines[model_path]
                 self._ensure_stream()
                 t0 = time.perf_counter()
+                self._set_state(model_path, "loading")
                 try:
                     if multimodal:
                         from mlx_vlm import load as vlm_load
@@ -105,11 +138,13 @@ class _MlxExecutor:
                     metrics.inc("mlx_load_errors")
                     metrics.emit("mlx_load_error", model=model_path, error=str(exc))
                     logger.error("mlx load failed model=%s err=%s", model_path, exc)
+                    self._set_state(model_path, "error", str(exc))
                     raise RuntimeError(
                         f"MLX 模型加载失败（检查 config.yaml 的 provider.model）：{exc}"
                     ) from exc
                 load_ms = (time.perf_counter() - t0) * 1000.0
                 self._engines[model_path] = engine
+                self._set_state(model_path, "loaded")
                 metrics.observe_ms("mlx_load", load_ms)
                 metrics.set_gauge("mlx_loaded", 1)
                 metrics.emit("mlx_loaded", model=model_path, load_ms=round(load_ms, 1))
@@ -124,6 +159,8 @@ class _MlxExecutor:
         with self._lock:
             self._engines.clear()
             self._no_vision.clear()
+        with self._state_lock:
+            self._states.clear()
 
     def vision_missing(self, model_path) -> bool:
         """已加载的模型是否缺视觉塔权重（mlx_vlm 加载后复查的结果）。"""
@@ -265,10 +302,13 @@ def set_active_model(path: str) -> str:
     if not path:
         raise ValueError("model 不能为空")
     _ACTIVE_MODEL = path
-    try:
-        get_mlx_executor().clear()
-    except Exception:
-        pass
+    # 只在 mlx 场景清引擎：非 mlx provider 不该顺手把推理线程拉起来
+    ex = _mlx_executor
+    if ex is not None:
+        try:
+            ex.clear()
+        except Exception:
+            pass
     return _ACTIVE_MODEL
 
 
@@ -290,6 +330,41 @@ def active_vision() -> bool:
     if not _ACTIVE_MODEL:
         return False
     return vision_capability(_ACTIVE_MODEL, "auto")
+
+
+def model_load_state(model_path: str = "") -> dict:
+    """现行（或指定）模型的加载状态，供页面展示。
+
+    state：
+    - remote：api/local provider，模型在远端/本地服务，无进程内加载概念
+    - unloaded / loading / loaded / error：mlx 进程内引擎的加载状态
+    """
+    path = (model_path or _ACTIVE_MODEL or "").strip()
+    if not path:
+        return {"model": "", "state": "unknown", "error": None}
+    ex = _mlx_executor
+    if ex is None:  # 还没有 mlx 引擎（api/local）：按远端就绪处理
+        return {"model": path, "state": "remote", "error": None}
+    rec = ex.status(path)
+    rec["model"] = path
+    return rec
+
+
+def preload_active(multimodal="auto") -> dict:
+    """切换模型后主动预热：后台异步加载现行模型，返回当前状态。
+
+    非 mlx（无引擎）时直接返回 remote，不启任何线程。
+    """
+    path = (_ACTIVE_MODEL or "").strip()
+    if not path:
+        return {"model": "", "state": "unknown", "error": None}
+    ex = _mlx_executor
+    if ex is None:
+        return {"model": path, "state": "remote", "error": None}
+    if ex.status(path).get("state") == "loaded":
+        return {"model": path, "state": "loaded", "error": None}
+    ex.preload(path, multimodal=detect_multimodal(path, multimodal))
+    return {"model": path, "state": "loading", "error": None}
 
 
 # ── 视觉能力探针 ───────────────────────────────────────────────────
