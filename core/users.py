@@ -16,7 +16,7 @@ from threading import RLock
 
 from .characters import default_character, load_characters
 from .persona import Persona
-from .memory import MemoryManager
+from .memory import MemoryManager, MEMORY_NAMESPACE
 from .metrics import logger, metrics
 
 
@@ -117,7 +117,7 @@ class UserManager:
             for entry in self._entries.values():
                 persona = entry["persona"]
                 if hasattr(persona, "memory_manager") and persona.memory_manager:
-                    stats = persona.memory_manager.get_stats(user_id="default")
+                    stats = persona.memory_manager.get_stats(user_id=MEMORY_NAMESPACE)
                     total += stats.get("facts", {}).get("total_facts", 0)
             return total
 

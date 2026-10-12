@@ -57,6 +57,7 @@ import yaml
 
 from core import attachments
 from core import llm as llm_mod
+from core.memory import MEMORY_NAMESPACE
 from core.metrics import logger, metrics, setup_logging
 from core.users import UserManager
 
@@ -70,7 +71,7 @@ def dump_memory(persona):
     mm = persona.memory_manager
     if mm is None:
         return {}
-    uid = "default"  # 每用户的 Persona 内统一使用 default 命名空间
+    uid = MEMORY_NAMESPACE  # 每用户的 Persona 内统一使用 default 命名空间
     return {
         "recent": mm.recent.get_messages(uid),
         "timeindex": mm.timeindex.all(uid),
@@ -470,7 +471,7 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                                      "error": "该角色未启用观测笔记（智子专有能力）"})
                     return
                 trace = persona.memory_manager.recall_trace(
-                    user_id="default", query=query, top_k=top_k
+                    user_id=MEMORY_NAMESPACE, query=query, top_k=top_k
                 )
                 trace["user_id"] = user_id
                 trace["character"] = persona.character

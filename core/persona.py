@@ -9,6 +9,7 @@ from . import attachments
 from . import websearch
 from .actions import split_reply
 from .llm import LLMClient
+from .memory import MEMORY_NAMESPACE
 from .metrics import logger, metrics
 
 
@@ -89,7 +90,7 @@ class Persona:
         history = None
         if self.memory_manager:
             context, trace = self.memory_manager.get_context_traced(
-                user_id="default", max_tokens=2000, query=user_input
+                user_id=MEMORY_NAMESPACE, max_tokens=2000, query=user_input
             )
             if context:
                 # 记忆并入首条 system 消息：多数 chat template 只允许开头一条 system
@@ -149,7 +150,7 @@ class Persona:
         """清空该用户的全部记忆：五维持久化 + 短期窗口 + 召回日志 + 图片。返回各维度删除计数。"""
         cleared = {}
         if self.memory_manager:
-            cleared = self.memory_manager.clear(user_id="default")
+            cleared = self.memory_manager.clear(user_id=MEMORY_NAMESPACE)
         self.history = []
         self.recall_log.clear()
         cleared["images"] = attachments.clear(self.note_dir)  # 附件同属这轮记忆
@@ -236,7 +237,7 @@ class Persona:
             mem_t0 = time.perf_counter()
             try:
                 result = self.memory_manager.process_message(
-                    user_id="default",
+                    user_id=MEMORY_NAMESPACE,
                     role="user",
                     content=user_input,
                     images=refs,
@@ -244,7 +245,7 @@ class Persona:
                 )
                 # 也可以处理助手回复
                 self.memory_manager.process_message(
-                    user_id="default",
+                    user_id=MEMORY_NAMESPACE,
                     role="assistant",
                     content=reply_text
                 )
@@ -287,7 +288,7 @@ class Persona:
         带图消息附 images（走 GET /image 取原图）与 caption（图片内容说明）。
         """
         if self.memory_manager:
-            raw = self.memory_manager.recent.get_messages("default", limit=limit)
+            raw = self.memory_manager.recent.get_messages(MEMORY_NAMESPACE, limit=limit)
             persisted = True
         else:
             raw = self.history[-limit:]
@@ -332,7 +333,7 @@ class Persona:
     def _turns(self):
         """当前生效的短期窗口：有观测笔记 → 落盘工作记忆，否则进程内窗口。"""
         if self.memory_manager:
-            return self.memory_manager.recent.get_messages("default")
+            return self.memory_manager.recent.get_messages(MEMORY_NAMESPACE)
         return self.history
 
     def _last_turn(self):
@@ -358,8 +359,8 @@ class Persona:
             self.history.pop()
             return
         store = self.memory_manager.recent
-        asst = store.pop_last("default", "assistant")
-        store.pop_last("default", "user")
+        asst = store.pop_last(MEMORY_NAMESPACE, "assistant")
+        store.pop_last(MEMORY_NAMESPACE, "user")
         if asst:
             self._forget_timeindex(asst.get("content", ""))
 
@@ -369,12 +370,12 @@ class Persona:
         if not text:
             return
         store = self.memory_manager.recent
-        for msg in store.get_messages("default"):
+        for msg in store.get_messages(MEMORY_NAMESPACE):
             if (msg.get("content") or "").strip() == text:
                 return
         try:
             if self.memory_manager.timeindex.forget(
-                    "default", text, category="conversation"):
+                    MEMORY_NAMESPACE, text, category="conversation"):
                 metrics.inc("timeindex_forgotten")
         except Exception as exc:   # 回滚不该拖垮重新生成
             logger.warning("时间索引回滚失败: %s", exc)
@@ -388,15 +389,15 @@ class Persona:
                 extra["images"] = user_msg["images"]
             if user_msg.get("caption"):
                 extra["caption"] = user_msg["caption"]
-            store.add_message("default", "user", user_msg.get("content", ""), **extra)
+            store.add_message(MEMORY_NAMESPACE, "user", user_msg.get("content", ""), **extra)
             content = asst_msg.get("content", "")
-            store.add_message("default", "assistant", content)
+            store.add_message(MEMORY_NAMESPACE, "assistant", content)
             # _drop_last_turn 已把旧回复从时间索引抹了，这里补回来，
             # 否则恢复后的这一轮召不到（提问那条没被删，不用补）
             if (content or "").strip():
                 try:
                     self.memory_manager.timeindex.add(
-                        user_id="default", content=content,
+                        user_id=MEMORY_NAMESPACE, content=content,
                         category="conversation", importance=3)
                 except Exception as exc:
                     logger.warning("时间索引恢复失败: %s", exc)
@@ -413,14 +414,14 @@ class Persona:
             if user_msg.get("caption"):
                 extra["caption"] = user_msg["caption"]
             self.memory_manager.recent.add_message(
-                "default", "user", user_msg.get("content", ""), **extra)
+                MEMORY_NAMESPACE, "user", user_msg.get("content", ""), **extra)
         else:
             self.history.append(dict(user_msg))
 
     def _remember_assistant(self, reply_text):
         """新回复入账：与 reply() 同一条路径（工作记忆 + 时间索引）。"""
         if self.memory_manager:
-            self.memory_manager.process_message(user_id="default", role="assistant",
+            self.memory_manager.process_message(user_id=MEMORY_NAMESPACE, role="assistant",
                                                 content=reply_text)
         else:
             self.history.append(self._msg("assistant", reply_text))
@@ -497,11 +498,11 @@ class Persona:
     def get_memory_stats(self):
         """获取记忆统计信息。"""
         if self.memory_manager:
-            return self.memory_manager.get_stats(user_id="default")
+            return self.memory_manager.get_stats(user_id=MEMORY_NAMESPACE)
         return {}
 
     def search_memory(self, query, top_k=10):
         """搜索记忆。"""
         if self.memory_manager:
-            return self.memory_manager.search(user_id="default", query=query, top_k=top_k)
+            return self.memory_manager.search(user_id=MEMORY_NAMESPACE, query=query, top_k=top_k)
         return {}

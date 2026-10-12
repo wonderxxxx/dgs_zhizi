@@ -13,7 +13,7 @@ zhizi/
 ├── core/
 │   ├── llm.py             # 统一调用层（API/local 走 OpenAI 协议；mlx 进程内推理）
 │   ├── metrics.py         # 运行指标 + 结构化日志（/metrics、SSE 事件源）
-│   ├── memory.py          # 观测笔记 v2：SQLite 持久化 + BM25 倒排检索 + 重要度 + 去重
+│   ├── memory/            # 五维记忆：工作记忆/近期/事实/反思/人格（MemoryManager 统一调度）
 │   ├── persona.py         # 人格装配：System Prompt + 记忆 + 历史 + 结构化回复
 │   ├── characters.py      # 角色注册表：prompt 读取（含字面量包装）+ 能力开关
 │   ├── visual_identity.py # 自视身份层：VLM 裸描述 → 属性匹配 → 「图片中可能是我」
@@ -106,8 +106,11 @@ curl "http://127.0.0.1:8765/history?user_id=alice&character=千夜智子&limit=2
 #    "messages":[{"role":"user","content":"…","actions":[],"time":"2026-09-20T21:00:00"},
 #                {"role":"assistant","content":"正文","actions":["（笑）"],"time":"…"}]}
 # 记录落在 notes/<user_id>/<角色>/memory/recent/recent_default.json：跨设备、跨会话、
-# 跨进程重启都在。persisted=false 表示该角色未启用观测笔记（memory: false），
-# 记录只在进程内，重启即失。limit 缺省 100、上限 500（取最近 N 条，正序返回）。
+# 跨进程重启都在。文件里的 default 不是真实 user_id——每个 (user × 角色) 的 MemoryManager
+# 都指向自己的目录，内部统一用 MEMORY_NAMESPACE 常量作命名空间键（core/memory/），
+# 隔离靠目录完成，别把真实 user_id 顶替进去。
+# persisted=false 表示该角色未启用观测笔记（memory: false），记录只在进程内，重启即失。
+# limit 缺省 100、上限 500（取最近 N 条，正序返回）。
 
 # 图片看得见 + 记得住：发图那一轮 /history 会多两个字段，原文保持干净
 #   images: [{"name":"20260928-111148-7f93bf.png","mime":"image/png"}]  字节在
