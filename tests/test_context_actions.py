@@ -13,12 +13,13 @@
 """
 
 import os
+import shutil
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory.manager import MemoryManager  # noqa: E402
+from core.memory.manager import MemoryManager, _NOTES_ROOT  # noqa: E402
 from core.memory.recent import RecentMemory  # noqa: E402
 
 PASS = []
@@ -61,7 +62,14 @@ def main():
           f"got={msgs[1]['content']!r}")
 
     # ── 4. manager 级：注入 system 的「最近对话」同样剥离 ────────
-    mm = MemoryManager(memory_dir=os.path.join(tmp, "memory"), llm_client=None)
+    # MemoryManager 校验 memory_dir 必须落在 notes 模板内，这里在项目 notes/
+    # 下建临时命名空间（隔离靠目录，绕开 _make() 的实例会被直接拒绝）。
+    mm_path = os.path.join(_NOTES_ROOT, "__test_ctx__", "default", "memory")
+    try:
+        mm = MemoryManager(memory_dir=mm_path, llm_client=None)
+    except ValueError as exc:
+        check("manager 目录校验：合法模板可创建", False, str(exc))
+        mm = None
     mm.recent.add_message("default", "user", "我买了两包薯片")
     mm.recent.add_message("default", "assistant", "（皱眉）又吃薯片。")
     context, trace = mm.get_context_traced(user_id="default", query="薯片")
@@ -72,6 +80,32 @@ def main():
     check("召回 trace：观测界面仍显示原文",
           recent_dim["items"][-1]["content"] == "（皱眉）又吃薯片。",
           f"got={recent_dim['items'][-1]!r}")
+    shutil.rmtree(os.path.dirname(mm_path), ignore_errors=True)
+
+    # ── 4b. memory_dir 模板校验：非法路径必须被拒 ────────────────
+    bad_paths = [
+        os.path.join(tmp, "memory"),                 # 不在 notes/ 树内
+        os.path.join(_NOTES_ROOT, "a", "b", "c", "memory"),  # 多了一层 persona
+        os.path.join(_NOTES_ROOT, "a", "memoryx"),   # 结尾不是 memory
+        os.path.join(_NOTES_ROOT, "memory"),         # 缺 namespace
+    ]
+    for bad in bad_paths:
+        try:
+            MemoryManager(memory_dir=bad, llm_client=None)
+            check("目录校验：拒绝 " + os.path.basename(bad), False)
+        except ValueError as exc:
+            check("目录校验：拒绝 " + os.path.basename(bad),
+                  bad in str(exc) and str(_NOTES_ROOT) in str(exc), str(exc)[:80])
+
+    # 默认角色形态：notes/<namespace>/memory/（省略 persona 段）也放行
+    try:
+        MemoryManager(
+            memory_dir=os.path.join(_NOTES_ROOT, "__test_ctx__", "memory"),
+            llm_client=None)
+        check("目录校验：默认角色形态（省略 persona 段）放行", True)
+    except ValueError as exc:
+        check("目录校验：默认角色形态（省略 persona 段）放行", False, str(exc))
+    shutil.rmtree(os.path.join(_NOTES_ROOT, "__test_ctx__"), ignore_errors=True)
 
     # ── 5. system 摘要行（压缩产物）不被误伤 ────────────────────
     r.add_message("default", "system", "之前的对话摘要: 她在吃薯片（动作描写）")

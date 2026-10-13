@@ -9,6 +9,8 @@
 """
 
 import os
+import re
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from .recent import RecentMemory
@@ -19,6 +21,23 @@ from .persona import PersonaMemory
 from ..attachments import with_caption
 
 
+# ── memory_dir 目录模板校验 ─────────────────────────────────────
+# MemoryManager 的路径必须按 notes/<namespace>/<persona>/memory/ 结构收尾
+# （默认角色可省略 <persona> 段）。隔离靠目录完成，这个校验保证没人能
+# 绕过 users._make() 用任意目录直接 new 一个实例把几个人的记忆写进同一处。
+# 不锚定死某个绝对根：配置 note_file 可指到别处（如测试的临时沙箱），
+# 只要整体结构仍是 notes/<namespace>/[<persona>/]memory 就放行；PROJECT_ROOT
+# 只用于在报错里展示规范期望形态（与 llm.py 用 __file__ 推项目根的做法一致，
+# 不硬编码绝对路径）。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_NOTES_ROOT = _PROJECT_ROOT / "notes"
+_MEMORY_DIR_RE = re.compile(
+    r"^/?(.*/)?notes/(?P<namespace>[^/]+)/(?:[^/]+/)?memory/?$"
+)
+_MEMORY_TEMPLATE = (f"{_NOTES_ROOT}/<namespace>/<persona>/memory/"
+                    "（默认角色可省略 <persona>：…/<namespace>/memory/）")
+
+
 class MemoryManager:
     """统一记忆管理器。"""
     
@@ -27,7 +46,17 @@ class MemoryManager:
         Args:
             memory_dir: 记忆存储根目录
             llm_client: LLM 客户端实例
+
+        Raises:
+            ValueError: memory_dir 不满足 notes/<namespace>/<persona>/memory/
+                模板（隔离靠目录完成，非法路径会穿帮），给出实际路径与期望模板。
         """
+        resolved = Path(memory_dir).resolve()
+        if not _MEMORY_DIR_RE.match(str(resolved)):
+            raise ValueError(
+                f"memory_dir 必须落在 {_MEMORY_TEMPLATE}；"
+                f"实际传入：{memory_dir!r}（解析后：{resolved}）"
+            )
         self.memory_dir = memory_dir
         self.llm_client = llm_client
         
