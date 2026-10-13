@@ -24,8 +24,8 @@ class Persona:
           读 config.system_prompt + 全局 visual_identity.card。"""
         if character is not None:
             self.character = character.name
-            self.system_prompt = (character.prompt_text or "").strip() or \
-                self._read_prompt_file(character.prompt_path)
+            # 整卡优先；无整卡的预设型角色按七字段渲染（含公共纪律块）。
+            self.system_prompt = character.system_prompt()
         else:
             self.character = "default"
             self.system_prompt = self._read_prompt_file(config["system_prompt"])

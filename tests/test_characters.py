@@ -17,8 +17,11 @@ from core.characters import (  # noqa: E402
     default_character,
     load_characters,
     load_prompt_text,
+    normalize_preset,
 )
+from core.guardrails import shared_guardrails  # noqa: E402
 from core.persona import Persona  # noqa: E402
+from core.presets import render_preset_prompt  # noqa: E402
 from core.users import UserManager  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,11 +57,29 @@ def make_cfg(tmp):
                 "visual_identity": IDENTITY,
                 "memory": True,
                 "default": True,
+                "preview_line": "喂——哥哥，帮我拿下薯片嘛，我在打 boss 呢。",
             },
             "白鸥": {
                 "prompt": BAIOU_TXT,
                 "visual_identity": "",
                 "memory": False,
+                "preview_line": "又没吃饭？……坐下，我端过来。",
+                "guardrails": True,
+                "preset": {
+                    "性格原型": "全能管家",
+                    "口头禅": "未知键应被丢弃",
+                    "一句话台词": "交给我。",
+                },
+            },
+            "毒舌学妹": {
+                "preview_line": "哟，又累成狗了？",
+                "memory": False,
+                "search": False,
+                "preset": {
+                    "性格原型": "毒舌学妹",
+                    "性格": "攻击性很强，但行动可靠。",
+                    "一句话台词": "让开，我来。",
+                },
             },
         },
         "memory": {"note_file": os.path.join(tmp, "notes"), "top_k": 5},
@@ -80,13 +101,57 @@ def main():
 
     # ── 2. 注册表解析 + 能力开关 ──────────────────────────────────
     chars = load_characters(make_cfg(tmp))
-    check("注册表：两个角色", set(chars) == {"千夜智子", "白鸥"})
+    check("注册表：三个角色", set(chars) == {"千夜智子", "白鸥", "毒舌学妹"})
     check("默认角色：千夜智子（标记 default）",
           default_character(chars) == "千夜智子")
     baiou = chars["白鸥"]
     check("白鸥：无自视身份卡", baiou.visual_identity == "")
     check("白鸥：不主动观测（memory=False）", baiou.memory is False)
     check("智子：memory=True", chars["千夜智子"].memory is True)
+
+    # ── 2b. 声明式元数据：preview_line / preset / guardrails ──────
+    check("preview_line：智子已解析",
+          chars["千夜智子"].preview_line.startswith("喂——"))
+    check("preview_line：白鸥已解析",
+          baiou.preview_line == "又没吃饭？……坐下，我端过来。")
+    bdict = baiou.to_dict()
+    check("to_dict：含 preview_line / guardrails",
+          bdict.get("preview_line") == "又没吃饭？……坐下，我端过来。"
+          and bdict.get("guardrails") is True)
+    check("preset：未知键丢弃 + 已知键保留",
+          baiou.preset == {"性格原型": "全能管家", "一句话台词": "交给我。"})
+    check("preset：智子无 preset → to_dict 不含该键",
+          "preset" not in chars["千夜智子"].to_dict())
+    check("guardrails：默认关（智子零改动）",
+          chars["千夜智子"].guardrails is False)
+    check("normalize_preset：按 PRESET_FIELDS 顺序 + 去空值",
+          list(normalize_preset(
+              {"一句话台词": "x", "性格": "y", "爱好": ""}).keys())
+          == ["性格", "一句话台词"])
+    check("shared_guardrails：含四条纪律关键词",
+          all(k in shared_guardrails()
+              for k in ("不复读", "用量克制", "不讨好", "守边界")))
+
+    # ── 2c. 预设型角色：无整卡 → 七字段渲染成提示词 + 纪律块自动并入 ──
+    jb = chars["毒舌学妹"]
+    check("预设角色：无整卡 prompt", jb.prompt_path == "" and jb.prompt_text == "")
+    check("预设角色：preset 已解析",
+          jb.preset == {"性格原型": "毒舌学妹", "性格": "攻击性很强，但行动可靠。",
+                        "一句话台词": "让开，我来。"})
+    check("预设角色：guardrails 自动开启（有效值）", jb.guardrails is True)
+    sp = jb.system_prompt()
+    check("预设角色：system prompt 由七字段渲染",
+          "# 角色：毒舌学妹" in sp and "## 性格" in sp
+          and "让开，我来。" in sp and "## 表达" in sp)
+    check("预设角色：缺字段段落自动跳过",
+          "## 口癖" not in sp and "## 爱好" not in sp)
+    check("预设角色：自动拼公共纪律块",
+          "不复读" in sp and "守边界" in sp and "用量克制" in sp)
+    jd = jb.to_dict()
+    check("预设角色：to_dict 含 preset、prompt 空、guardrails=true",
+          jd["prompt"] == "" and "preset" in jd and jd["guardrails"] is True)
+    check("渲染器：全空预设 → 空串",
+          render_preset_prompt("x", {}) == "")
 
     # ── 3. 兼容旧配置：无 characters 段 → 单角色 default ──────────
     legacy = load_characters({
@@ -96,6 +161,9 @@ def main():
     check("旧配置：单角色 default", set(legacy) == {"default"})
     check("旧配置：default 启用记忆与身份卡",
           legacy["default"].memory is True and legacy["default"].visual_identity == IDENTITY)
+    check("旧配置：default 无 preview_line、guardrails 关",
+          legacy["default"].preview_line == ""
+          and legacy["default"].guardrails is False)
 
     # ── 4. UserManager 二级隔离 + 能力门控（白鸥无记忆） ──────────
     cfg = make_cfg(tmp)
@@ -132,6 +200,17 @@ def main():
     p = Persona(cfg, llm=FakeLLM(), character=chars["白鸥"])
     check("Persona：白鸥 prompt 已装配", "白鸥" in p.system_prompt and "乌鸦" in p.system_prompt)
     check("Persona：白鸥 无观察记忆", p.memory_manager is None)
+
+    # ── 5b. guardrails 注入：显式开启才拼，默认角色零改动 ─────────
+    check("guardrails：开启角色拼上纪律块",
+          "不复读" in p.system_prompt and "守边界" in p.system_prompt)
+    p_plain = Persona(cfg, llm=FakeLLM(), character=chars["千夜智子"])
+    check("guardrails：默认角色不拼（零改动）",
+          "不复读" not in p_plain.system_prompt)
+
+    p_jb = Persona(cfg, llm=FakeLLM(), character=chars["毒舌学妹"])
+    check("Persona：预设角色装配渲染提示词 + 纪律块",
+          "毒舌学妹" in p_jb.system_prompt and "不复读" in p_jb.system_prompt)
 
     print()
     print(f"通过 {sum(PASS)}/{len(PASS)}")

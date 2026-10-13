@@ -17,7 +17,7 @@
                     一级用户 / 二级角色：不同角色独立人格与记忆命名空间。
                     allow_search 缺省 true：本轮是否允许按需联网搜索
                     （searched = 这轮是否真的查了；壳子可据此展示提示）。
-    GET  /characters → {"default": "千夜智子", "characters": [{name, prompt, visual_identity, memory, search, default}]}
+    GET  /characters → {"default": "千夜智子", "characters": [{name, prompt, visual_identity, memory, search, default, preview_line, guardrails, (preset)}]}
     GET  /users      → {"default": "default", "users": ["default", "alice", ...]}
                     已知 user_id 清单（notes 落盘目录 ∪ 内存活跃键），供壳子做用户下拉框
     GET  /history    → {"user_id","character","persisted","messages":[{role,content,actions,time}]}
