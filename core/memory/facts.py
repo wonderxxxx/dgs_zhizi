@@ -237,37 +237,56 @@ class FactMemory:
             ]
     
     def search_facts(self, user_id: str, query: str, top_k: int = 10) -> List[Dict]:
-        """搜索事实。
-        
+        """分词匹配搜索事实。
+
+        整句 LIKE 对多行提问永远不命中（"fact LIKE %整条消息%"），改为：
+        复用 timeindex 的中文 bigram 分词，查询 token 与事实 token 任一相交
+        即命中，按命中 token 数 × 置信度排序，每条附 matched_terms 供上层
+        判断是否注入。
+
         Args:
             user_id: 用户ID
             query: 搜索查询
             top_k: 返回的最大结果数
-            
+
         Returns:
-            匹配的事实列表
+            匹配的事实列表（含 matched_terms）
         """
-        # 简单实现：使用 LIKE 搜索
+        from .timeindex import _query_tokens, _tokenize
+
+        terms = _query_tokens((query or "").strip())
+        if not terms:
+            return []
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, fact, source, confidence, created_at, updated_at"
-                " FROM facts WHERE user_id = ? AND fact LIKE ?"
-                " ORDER BY confidence DESC LIMIT ?",
-                (user_id, f"%{query}%", top_k)
+                " FROM facts WHERE user_id = ?",
+                (user_id,),
             ).fetchall()
-            
-            return [
-                {
-                    "id": row[0],
-                    "user_id": user_id,
-                    "fact": row[1],
-                    "source": row[2],
-                    "confidence": row[3],
-                    "created_at": row[4],
-                    "updated_at": row[5]
-                }
-                for row in rows
-            ]
+
+        scored = []
+        for row in rows:
+            fact_tokens = _tokenize(row[1])
+            matched = sorted(t for t in terms if t in fact_tokens)
+            if not matched:
+                continue
+            score = len(matched) * (0.5 + float(row[3] or 0))
+            scored.append((score, float(row[3] or 0), row, matched))
+        scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+
+        return [
+            {
+                "id": row[0],
+                "user_id": user_id,
+                "fact": row[1],
+                "source": row[2],
+                "confidence": row[3],
+                "created_at": row[4],
+                "updated_at": row[5],
+                "matched_terms": matched,
+            }
+            for _, _, row, matched in scored[:top_k]
+        ]
     
     def get_fact(self, user_id: str, fact_id: int) -> Optional[Dict]:
         """获取指定事实。"""

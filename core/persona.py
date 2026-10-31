@@ -3,7 +3,7 @@
 import base64
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import attachments
 from . import websearch
@@ -11,6 +11,45 @@ from .actions import split_reply
 from .llm import LLMClient
 from .memory import MEMORY_NAMESPACE
 from .metrics import logger, metrics
+from .presets import load_moods, render_mood
+
+
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+# 小于这个间隔当作「同一场对话」的延续，不给相对时间，免得每轮都念「过了几秒」
+_REL_GAP = timedelta(minutes=10)
+
+
+def _humanize_gap(delta):
+    """时间间隔 → 自然语言（分钟/小时/天），供时间锚点用。"""
+    total_min = int(delta.total_seconds() // 60)
+    if total_min < 1:
+        return "不到 1 分钟"
+    if total_min < 60:
+        return f"{total_min} 分钟"
+    hours, mins = divmod(total_min, 60)
+    if hours < 24:
+        if mins and hours < 6:
+            return f"{hours} 小时 {mins} 分钟"
+        return f"{hours} 小时"
+    return f"{hours // 24} 天"
+
+
+def time_anchor(now, last_ts=None):
+    """把「现在」与「距上次对话多久」渲染成一段注入 system 的文本。
+
+    now: datetime（本地时区，须与消息时间戳同源）
+    last_ts: 上一条已落盘消息的 ISO 时间戳；缺失/解析失败 → 只给绝对时间。
+    """
+    stamp = f"{now:%Y-%m-%d} {_WEEKDAYS[now.weekday()]} {now:%H:%M}"
+    text = f"【此刻】现在是 {stamp}。"
+    if last_ts:
+        try:
+            last = datetime.fromisoformat(last_ts)
+        except (ValueError, TypeError):
+            last = None
+        if last is not None and now - last >= _REL_GAP:
+            text += f"距上次和TA说话已过 {_humanize_gap(now - last)}。"
+    return text
 
 
 class Persona:
@@ -63,17 +102,50 @@ class Persona:
             self.websearch = websearch.WebSearch(config)
             self.search_prompt = websearch.tool_instructions()
         self.last_searched = False  # 最近一轮是否真的发起过搜索（供壳子展示）
+        self.last_mood = ""  # 最近一轮生效的状态名（"" = 无状态基线）
         self.history = []  # 短期记忆窗口
         self.last_attachments = {}  # 最近一轮的图片：{images:[{name,mime}], caption}
         self.recall_log = deque(maxlen=50)  # 每轮聊天的记忆召回 trace（供观测界面）
+        # mood 层：稳定卡之上按轮声明的可变状态（config 的 moods 注册表）。
+        # 只覆盖表达层；未知状态名当无状态处理，情绪永远可以下一轮走掉。
+        self.moods = load_moods(config)
 
     @staticmethod
     def _read_prompt_file(path):
         with open(path, encoding="utf-8") as fh:
             return fh.read().strip()
 
+    def _last_turn_time(self):
+        """上一条已落盘消息的时间戳（跨重启也有），无历史 → None。
+
+        build_messages 在本轮提问入账前调用，所以拿到的正是「上一轮」的时间——
+        时间锚点算的就是真实的隔了多久。
+        """
+        if self.memory_manager:
+            msgs = self.memory_manager.recent.get_messages(MEMORY_NAMESPACE, limit=1)
+            if msgs:
+                return msgs[-1].get("timestamp")
+        elif self.history:
+            return self.history[-1].get("timestamp")
+        return None
+
+    def time_anchor_block(self, now=None):
+        """本轮注入的时间锚点：「现在几点」+「距上次对话多久」。"""
+        return time_anchor(now or datetime.now(), self._last_turn_time())
+
+    def _mood_block(self, mood):
+        """按名字取状态段 → (渲染文本, 规范化状态名)。未知/空 → ("", "")。
+
+        状态是每轮显式声明的：请求不带的轮次就是无状态基线，情绪自然流动。
+        """
+        mood = (mood or "").strip()
+        data = self.moods.get(mood) if mood else None
+        if not mood or not data:
+            return "", ""
+        return render_mood(self.character, mood, data), mood
+
     def build_messages(self, user_input, self_context="", search_context="",
-                       with_tools=True):
+                       with_tools=True, mood_block=""):
         """拼完整消息序列。
 
         search_context：本轮搜索结果块（两段式的第二遍才传；重建而非追加，
@@ -102,11 +174,18 @@ class Persona:
         else:
             history = self.history[-10:]  # 兼容旧版：简单历史（最近10条）
 
+        # 时间锚点：让她分得清「现在几点」「隔了多久」，接在记忆之后、
+        # 工具/状态之前（状态覆盖段仍保持最后，压制力不被稀释）
+        system_content += "\n\n" + self.time_anchor_block()
+
         # 工具说明（每轮）与搜索结果（仅第二遍）都并入首条 system
         if with_tools and self.search_prompt:
             system_content += "\n\n" + self.search_prompt
         if search_context:
             system_content += "\n\n" + search_context
+        # 状态覆盖段最后追加：最新的指令最接近正文，压制效果最强
+        if mood_block:
+            system_content += "\n\n" + mood_block
 
         messages = [{"role": "system", "content": system_content}]
         for m in history or []:
@@ -162,7 +241,7 @@ class Persona:
             else self.llm.chat(messages)
 
     def _generate(self, user_input, images=None, self_context="",
-                  allow_search=True):
+                  allow_search=True, mood_block=""):
         """生成一轮回复（含按需搜索的两段式）。返回 (reply_text, searched)。
 
         第一遍：正常生成。没吐 <search> 信封 → 直接就是回复（绝大多数轮次
@@ -170,11 +249,13 @@ class Persona:
         吐了信封 → 执行搜索（额度内），**重建** messages（带结果块）再生成
         第二遍——第一遍的信封文本被丢弃，最终回复、历史、记忆永远看不到
         工具文本。第二遍还硬要查 → 撤掉工具说明再要一遍（封顶 3 次调用）。
+        mood_block：本轮状态覆盖段（无状态基线传空串）。
         """
         self.last_searched = False
         active = bool(allow_search and self.websearch)
         reply = self._chat_once(
-            self.build_messages(user_input, self_context=self_context), images)
+            self.build_messages(user_input, self_context=self_context,
+                                mood_block=mood_block), images)
         calls = websearch.parse_tool_calls(reply) if active else []
         if not calls:
             return websearch.strip_tool_calls(reply), False
@@ -195,20 +276,23 @@ class Persona:
         ctx = websearch.render_results(results)
         reply2 = self._chat_once(
             self.build_messages(user_input, self_context=self_context,
-                                search_context=ctx),
+                                search_context=ctx, mood_block=mood_block),
             images)
         if websearch.parse_tool_calls(reply2):
             # 额度已用完：带结果再问一遍，同时撤掉工具说明（没得查就只能答）
             if not websearch.strip_tool_calls(reply2):
                 reply2 = self._chat_once(
                     self.build_messages(user_input, self_context=self_context,
-                                        search_context=ctx, with_tools=False),
+                                        search_context=ctx, with_tools=False,
+                                        mood_block=mood_block),
                     images)
         return websearch.strip_tool_calls(reply2), True
 
-    def reply(self, user_input, images=None, allow_search=True):
+    def reply(self, user_input, images=None, allow_search=True, mood=""):
         t0 = time.perf_counter()
         metrics.inc("chat_turns")
+        mood_block, mood_name = self._mood_block(mood)
+        self.last_mood = mood_name
         # 图片自识别：VLM 裸描述 → 属性匹配 → 置信度 ≥ 阈值才注入「可能是我」上下文
         self_context = ""
         described = None
@@ -217,7 +301,8 @@ class Persona:
             described = getattr(self.visual_identity, "last_described", None)
         reply_text, _ = self._generate(user_input, images=images,
                                        self_context=self_context,
-                                       allow_search=allow_search)
+                                       allow_search=allow_search,
+                                       mood_block=mood_block)
 
         # 图片：字节落盘（刷新后还在）+ 一句话说明（进记忆，她记得你给她看过什么）
         refs = attachments.save_images(self.note_dir, images) if images else []
@@ -226,8 +311,8 @@ class Persona:
             cap = attachments.caption(self.llm, images, described)
         self.last_attachments = ({"images": refs, "caption": cap} if refs else {})
 
-        # 更新历史（图片引用与说明分列，原文保持干净）
-        self.history.append(self._msg("user", user_input, refs, cap))
+        # 更新历史（图片引用与说明分列，原文保持干净；状态名挂在提问上供重生成沿用）
+        self.history.append(self._msg("user", user_input, refs, cap, mood_name))
         self.history.append(self._msg("assistant", reply_text))
         if len(self.history) > 40:  # 短期窗口上限，防上下文膨胀
             self.history = self.history[-40:]
@@ -242,6 +327,7 @@ class Persona:
                     content=user_input,
                     images=refs,
                     caption=cap,
+                    mood=mood_name,
                 )
                 # 也可以处理助手回复
                 self.memory_manager.process_message(
@@ -270,13 +356,15 @@ class Persona:
         return reply_text
 
     @staticmethod
-    def _msg(role, content, images=None, caption=""):
+    def _msg(role, content, images=None, caption="", mood=""):
         """一条消息：图片引用与内容说明只在有值时挂上（保持历史 JSON 干净）。"""
         msg = {"role": role, "content": content}
         if images:
             msg["images"] = images
         if caption:
             msg["caption"] = caption
+        if mood:
+            msg["mood"] = mood
         return msg
 
     def get_history(self, limit=50):
@@ -310,20 +398,25 @@ class Persona:
                 out["images"] = msg["images"]
             if msg.get("caption"):
                 out["caption"] = msg["caption"]
+            if msg.get("mood"):
+                out["mood"] = msg["mood"]
             messages.append(out)
         return {"messages": messages, "persisted": persisted}
 
-    def reply_structured(self, user_input, images=None, allow_search=True):
-        """壳子友好版：返回 {reply(正文), actions(动作列表), raw(原文), searched}。
+    def reply_structured(self, user_input, images=None, allow_search=True, mood=""):
+        """壳子友好版：返回 {reply(正文), actions(动作列表), raw(原文), searched, mood}。
 
         历史与笔记仍以原文(raw)记录，保证上下文连续；展示层按需取字段。
         带图的轮次另附 attachments（落盘引用 + 图片内容说明）。
         searched：本轮是否真的发起了联网搜索（壳子可选择展示，默认不渲染）。
+        mood：本轮生效的状态名（未知状态名或未声明 → ""，即无状态基线）。
         """
-        raw = self.reply(user_input, images=images, allow_search=allow_search)
+        raw = self.reply(user_input, images=images, allow_search=allow_search,
+                         mood=mood)
         content, actions = split_reply(raw)
         result = {"reply": content, "actions": actions, "raw": raw,
-                  "searched": bool(self.last_searched)}
+                  "searched": bool(self.last_searched),
+                  "mood": self.last_mood}
         if self.last_attachments:
             result["attachments"] = self.last_attachments
         return result
@@ -389,6 +482,8 @@ class Persona:
                 extra["images"] = user_msg["images"]
             if user_msg.get("caption"):
                 extra["caption"] = user_msg["caption"]
+            if user_msg.get("mood"):
+                extra["mood"] = user_msg["mood"]
             store.add_message(MEMORY_NAMESPACE, "user", user_msg.get("content", ""), **extra)
             content = asst_msg.get("content", "")
             store.add_message(MEMORY_NAMESPACE, "assistant", content)
@@ -413,6 +508,8 @@ class Persona:
                 extra["images"] = user_msg["images"]
             if user_msg.get("caption"):
                 extra["caption"] = user_msg["caption"]
+            if user_msg.get("mood"):
+                extra["mood"] = user_msg["mood"]
             self.memory_manager.recent.add_message(
                 MEMORY_NAMESPACE, "user", user_msg.get("content", ""), **extra)
         else:
@@ -456,6 +553,9 @@ class Persona:
         images = self._load_ref_images(user_msg.get("images"))
         if not user_input and not images:
             raise ValueError("没有可重新生成的回复（上一轮没有内容）")
+        # 状态沿用上一轮声明的（挂在提问上），换模型重问不能把语气换没了
+        mood_name = self._mood_block(user_msg.get("mood"))[1]
+        self.last_mood = mood_name
 
         self._drop_last_turn()
         t0 = time.perf_counter()
@@ -464,9 +564,11 @@ class Persona:
             self_context = ""
             if images and self.visual_identity is not None:
                 self_context = self.visual_identity.analyze(images) or ""
+            mood_block, _ = self._mood_block(mood_name)
             reply_text, _ = self._generate(user_input, images=images,
                                            self_context=self_context,
-                                           allow_search=allow_search)
+                                           allow_search=allow_search,
+                                           mood_block=mood_block)
         except Exception:
             self._restore_last_turn(user_msg, asst_msg)   # 失败就当没重试过
             raise
@@ -493,7 +595,8 @@ class Persona:
         raw = self.regenerate(allow_search=allow_search)
         content, actions = split_reply(raw)
         return {"reply": content, "actions": actions, "raw": raw,
-                "searched": bool(self.last_searched)}
+                "searched": bool(self.last_searched),
+                "mood": self.last_mood}
 
     def get_memory_stats(self):
         """获取记忆统计信息。"""

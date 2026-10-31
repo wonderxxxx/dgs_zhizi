@@ -90,7 +90,7 @@ class MemoryManager:
     
     def process_message(self, user_id: str, role: str, content: str,
                         images: List[Dict[str, str]] = None,
-                        caption: str = None) -> Dict[str, Any]:
+                        caption: str = None, mood: str = None) -> Dict[str, Any]:
         """处理一条消息，更新所有相关记忆。
         
         Args:
@@ -100,6 +100,8 @@ class MemoryManager:
             images: 图片引用 [{name, mime}]（只存工作记忆，取图走 /image）
             caption: 图片内容说明：工作记忆单列一个字段给界面看，
                      检索与事实提取则用「原文 + 说明」的文本
+            mood: 本轮声明并生效的状态名（只挂工作记忆供重生成沿用，
+                  不参与检索/事实提取——它是表达层的临时状态，不是久远事实）
             
         Returns:
             处理结果摘要
@@ -117,6 +119,8 @@ class MemoryManager:
             extra["images"] = images
         if caption:
             extra["caption"] = caption
+        if mood:
+            extra["mood"] = mood
         self.recent.add_message(user_id, role, content, **extra)
         result["recent"] = True
         
@@ -240,7 +244,7 @@ class MemoryManager:
             ],
         })
 
-        # 4. 事实记忆：LIKE 子串匹配，按置信度排序
+        # 4. 事实记忆：分词匹配（search_facts 返回 matched_terms），按得分排序
         if query:
             facts = self.facts.search_facts(user_id, query, top_k=top_k)
         else:
@@ -248,13 +252,13 @@ class MemoryManager:
         trace["dimensions"].append({
             "dim": "facts",
             "label": "事实记忆",
-            "reason": "LIKE 子串匹配，按置信度排序",
+            "reason": "分词匹配：中文 bigram / 英文·数字整词，命中数×置信度排序",
             "items": [
                 {"fact": f.get("fact", ""), "confidence": f.get("confidence"),
                  "source": (f.get("source") or "")[:80],
-                 "matched_terms": [query] if query and query in f.get("fact", "") else []}
+                 "matched_terms": f.get("matched_terms") or []}
                 for f in facts
-            ],
+            ]
         })
 
         # 5. 反思记忆：关键词命中已确认洞察

@@ -11,6 +11,8 @@ import os
 import sys
 import tempfile
 
+import yaml
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.characters import (  # noqa: E402
@@ -122,7 +124,7 @@ def main():
           baiou.preset == {"性格原型": "全能管家", "一句话台词": "交给我。"})
     check("preset：智子无 preset → to_dict 不含该键",
           "preset" not in chars["千夜智子"].to_dict())
-    check("guardrails：默认关（智子零改动）",
+    check("guardrails：默认关（未显式开启时）",
           chars["千夜智子"].guardrails is False)
     check("normalize_preset：按 PRESET_FIELDS 顺序 + 去空值",
           list(normalize_preset(
@@ -201,12 +203,23 @@ def main():
     check("Persona：白鸥 prompt 已装配", "白鸥" in p.system_prompt and "乌鸦" in p.system_prompt)
     check("Persona：白鸥 无观察记忆", p.memory_manager is None)
 
-    # ── 5b. guardrails 注入：显式开启才拼，默认角色零改动 ─────────
+    # ── 5b. guardrails 注入：显式开启才拼，未开启的整卡角色零改动 ────
     check("guardrails：开启角色拼上纪律块",
-          "不复读" in p.system_prompt and "守边界" in p.system_prompt)
+          shared_guardrails() in p.system_prompt)
     p_plain = Persona(cfg, llm=FakeLLM(), character=chars["千夜智子"])
-    check("guardrails：默认角色不拼（零改动）",
-          "不复读" not in p_plain.system_prompt)
+    check("guardrails：未显式开启时不拼",
+          shared_guardrails() not in p_plain.system_prompt)
+
+    # ── 5c. 真实 config：智子显式开启纪律块（防"人设关键词复读"回归）──
+    with open(os.path.join(BASE, "config.yaml"), encoding="utf-8") as fh:
+        real_cfg = yaml.safe_load(fh)
+    real_specs = load_characters(real_cfg)
+    check("config：智子显式开启 guardrails",
+          real_specs["千夜智子"].guardrails is True)
+    p_real = Persona(real_cfg, llm=FakeLLM(), character=real_specs["千夜智子"])
+    check("config：智子 system 含纪律块 + 红线5（不拿工作当挡箭牌）",
+          shared_guardrails() in p_real.system_prompt
+          and "不拿工作/学术当挡箭牌" in p_real.system_prompt)
 
     p_jb = Persona(cfg, llm=FakeLLM(), character=chars["毒舌学妹"])
     check("Persona：预设角色装配渲染提示词 + 纪律块",

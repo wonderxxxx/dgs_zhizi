@@ -422,13 +422,15 @@ def make_handler(users, api_key="", dashboard_enabled=True):
                             allow_search=allow_search)
                     else:
                         message = str(body.get("message", "")).strip()
+                        mood = str(body.get("mood", "")).strip()
                         images = self._parse_attachments(body)
                         if not message and not images:
                             metrics.inc("chat_bad_requests")
                             self._send(400, {"error": "message 不能为空"})
                             return
                         result = persona.reply_structured(
-                            message, images=images, allow_search=allow_search)
+                            message, images=images, allow_search=allow_search,
+                            mood=mood)
                 # reply 恒为正文；hide_actions=true 时不返回动作列表（省流量）
                 if body.get("hide_actions", False):
                     result.pop("actions", None)
@@ -535,7 +537,7 @@ def main():
     setup_logging(log_file=obs.get("log_file") or None, level=obs.get("level") or "INFO")
 
     server_cfg = config.get("server", {}) or {}
-    host = args.host or server_cfg.get("host", "127.0.0.1")
+    host = args.host or server_cfg.get("host", "0.0.0.0")
     port = args.port or int(server_cfg.get("port", 8765))
     api_key = server_cfg.get("api_key", "") or ""
     dashboard_enabled = bool(obs.get("dashboard", True))
